@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8"/>
+  <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+  <title>WlanMerge</title>
+  <link rel="stylesheet" href="./src/style.css"/>
+</head>
+<body>
+  <header class="titlebar" style="--wails-draggable:drag">
+    <img src="./src/logo.png" class="logo" alt=""/>
+    <span class="title">WlanMerge</span>
+    <span class="spacer"></span>
+    <button class="icon-btn" id="btn-theme" title="Design wechseln" data-tt style="--wails-draggable:no-drag"></button>
+    <button class="icon-btn" id="btn-settings" title="Einstellungen" style="--wails-draggable:no-drag"></button>
+    <button class="icon-btn" id="btn-min" title="Minimieren" data-tt style="--wails-draggable:no-drag"></button>
+    <button class="icon-btn close" id="btn-close" title="In den Hintergrund" data-tt style="--wails-draggable:no-drag"></button>
+  </header>
+
+  <main id="view-main" class="view">
+    <section class="hero">
+      <div class="power-wrap" id="power-wrap"><button id="power" class="power" aria-label="Ein/Aus" data-tt></button></div>
+      <div id="status" class="status">Aus</div>
+      <div id="speed" class="speed"></div>
+      <div class="st" id="st">
+        <button class="st-start" id="st-btn" title="Misst ca. 10 s alle Leitungen gleichzeitig" data-tt><span class="st-ic"></span><span id="st-label">Speedtest</span></button>
+        <div class="st-panel" id="st-panel"><div class="st-inner"><div class="st-card">
+          <div class="bar st-prog hidden" id="st-prog"><i></i></div>
+          <div id="st-body" class="st-body"></div>
+          <div class="st-actions">
+            <button class="btn ghost" id="st-save">Ergebnis speichern</button>
+            <button class="btn ghost" id="st-again" data-t>Nochmal</button>
+            <span class="spacer"></span>
+            <button class="icon-btn" id="st-close" title="Einklappen" data-tt></button>
+          </div>
+        </div></div></div>
+      </div>
+      <div id="substatus" class="substatus"></div>
+      <div id="dl-active" class="dl-active"></div>
+    </section>
+
+    <div id="banner" class="banner hidden"><span id="banner-text"></span><button class="icon-btn small" id="banner-close"></button></div>
+
+    <section id="links" class="links"></section>
+  </main>
+
+  <main id="view-settings" class="view hidden">
+    <h2 data-t>Einstellungen</h2>
+    <div class="group">
+      <div class="row"><span><b data-t>Sprache</b><small>Deutsch · English</small></span>
+        <div class="lang-switch"><button class="flag" id="lang-de" title="Deutsch"></button><button class="flag" id="lang-en" title="English"></button></div></div>
+      <label class="row"><span><b data-t>Automatisch einschalten</b><small data-t>Beim Programmstart sofort bündeln</small></span><input type="checkbox" class="switch" id="set-autoconnect"/></label>
+      <label class="row"><span><b data-t>Mit {os} starten</b><small data-t>Startet unauffällig im Hintergrund</small></span><input type="checkbox" class="switch" id="set-autostart"/></label>
+      <label class="row"><span><b data-t>Laufende Downloads umverteilen</b><small data-t>Steam, Battle.net &amp; Epic nutzen so alle Leitungen voll aus</small></span><input type="checkbox" class="switch" id="set-rebalance"/></label>
+    </div>
+
+    <h3 data-t>Handy verbinden</h3>
+    <div class="group">
+      <div class="row conn-way"><span><b data-t>USB-Kabel</b><small data-t>Am schnellsten und stabilsten. Am Handy „USB-Tethering" einschalten.</small></span><em class="tag best" data-t>Empfohlen</em></div>
+      <div class="row conn-way"><span><b data-t>WLAN-Hotspot</b><small data-t>Braucht einen <b>zweiten</b> WLAN-Adapter am Computer (z. B. USB-WLAN-Stick), der mit dem Handy-Hotspot verbunden ist. Wird automatisch als Handy erkannt.</small></span><em class="tag" data-t>Schnell</em></div>
+    </div>
+
+    <h3 data-t>Datenvolumen</h3>
+    <div class="group">
+      <label class="row"><span><b data-t>Verbrauch zurücksetzen</b><small data-t>Jeden Monat an diesem Tag, passend zu deinem Handyvertrag</small></span><select class="select" id="set-resetday"></select></label>
+    </div>
+
+    <h3 data-t>Browser-Downloads</h3>
+    <div class="group">
+      <label class="row"><span><b data-t>Browser-Downloads beschleunigen</b><small data-t>Downloads in Chrome und Edge laden automatisch über alle Leitungen</small></span><input type="checkbox" class="switch" id="set-dl-enabled"/></label>
+      <div class="row"><span><b data-t>Browser-Erweiterung</b><small data-t>Einmalig in Chrome oder Edge laden</small></span><button class="btn ghost" id="set-ext" data-t>Einrichten</button></div>
+      <div class="row ext-help hidden" id="ext-help"><span><small data-t>1. In Chrome <code>chrome://extensions</code> bzw. in Edge <code>edge://extensions</code> öffnen.<br>2. Oben rechts den <b>Entwicklermodus</b> einschalten.<br>3. <b>Entpackte Erweiterung laden</b> und den eben geöffneten Ordner „extension" auswählen.<br>Fertig – Downloads laufen ab jetzt automatisch über alle Leitungen.</small></span></div>
+    </div>
+
+    <h3 data-t>Notfall</h3>
+    <div class="group">
+      <div class="row"><span><b data-t>Netzwerk zurücksetzen</b><small data-t>Schaltet aus und stellt die Netzwerk-Einstellungen von {os} garantiert wieder her</small></span><button class="btn danger" id="emergency" data-t>Zurücksetzen</button></div>
+    </div>
+
+    <h3 data-t>Rechtliches</h3>
+    <div class="group">
+      <div class="row"><span><b data-t>Haftungsausschluss</b></span><button class="btn ghost" id="set-legal" data-t>Lesen</button></div>
+      <div class="row ext-help hidden" id="legal-text"><span><small id="legal-body"></small></span></div>
+    </div>
+
+    <p class="hint footnote" data-t>Gut zu wissen: Eine einzelne Verbindung kann nie auf zwei Leitungen gleichzeitig laufen. Steam, Battle.net und Epic laden über viele Verbindungen – die werden verteilt und bei Bedarf umgeschichtet. Browser-Downloads teilt WlanMerge in Stücke auf, wenn der Server das erlaubt – der Browser zeigt dann die Geschwindigkeit aller Leitungen zusammen. Spiele und Logins laufen immer stabil über die Hauptleitung (WLAN bzw. LAN).</p>
+  </main>
+
+  <script src="./src/main.js" type="module"></script>
+</body>
+</html>

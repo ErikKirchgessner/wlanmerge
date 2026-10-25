@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "WlanMerge Download-Manager",
+  "description": "Gibt große Downloads an WlanMerge weiter, damit sie über alle Leitungen gleichzeitig laden.",
+  "version": "1.0.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnnnL/g0C+wz4HjqbpjpmdH5zxRlGH1FDjWZmtTlX/lYwlYemM8+0GJWL0wKp4HC7hajD781iY72rQFH7ZsBHLsmlfN/j2Uu3ng5zibCU7xe/1O18WMflnLtHJlBJqZeNwLvQk3C06BtxkwGnFFYGH2X+WoBA+YbvyxB430ly2rPLaRd92ELNMbZ3cDFGlktrp+dWCwMu2SmuTyQWZJn9C+0xxobo9RLv6bbAsvwovrowHik0hFNOkczOcKvyWv60fWIpf2h+a8sPWaAbTswbclMHMBYEZxJfY6hxpbj53+r4L9jp/kT9JUFmk/kRefJj8sTtcIKiDXx9mDGFJWxRwQIDAQAB",
+  "permissions": ["downloads", "cookies", "nativeMessaging"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "icons": { "128": "icon128.png" }
+}

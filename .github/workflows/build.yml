@@ -1,0 +1,60 @@
+# Baut WlanMerge für Windows – kostenlos auf GitHub.
+# - bei jedem Push: testen und bauen (Dateien unter "Actions" → Lauf → Artifacts)
+# - bei einem Versions-Tag (z. B. v1.1.0): zusätzlich ein Release mit allen Dateien
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write # nur für das Release beim Tag
+
+env:
+  WAILS_VERSION: v2.16.0
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version-file: go.mod }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Wails installieren
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@${{ env.WAILS_VERSION }}
+      - name: NSIS (Installer-Baukasten)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) { choco install nsis -y --no-progress }
+          "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Tests
+        run: go test ./...
+      - name: Bauen (Installer)
+        shell: pwsh
+        run: |
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o build\bin\wlanmerge-host.exe .\cmd\wlanmerge-host
+          wails build -nsis -trimpath -ldflags "-s -w"
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build\bin\WlanMerge-amd64-installer.exe dist\WlanMerge-Setup-Windows.exe
+      - uses: actions/upload-artifact@v4
+        with: { name: windows, path: dist/* }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - name: Prüfsummen
+        run: cd dist && sha256sum * > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: .github/RELEASE_NOTES.md

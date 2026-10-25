@@ -1,0 +1,27 @@
+# Haftungsausschluss / Disclaimer
+
+## Deutsch
+
+**WlanMerge ist kostenlose Software und wird „wie besehen“ bereitgestellt – ohne jede Gewährleistung.**
+
+1. **Nutzung auf eigene Gefahr.** WlanMerge verändert die Netzwerkeinstellungen deines Computers (virtueller Netzwerkadapter, zusätzliche Routen) und leitet Datenverkehr über deine Internetverbindungen, auch über mobile Daten. Die Nutzung erfolgt ausschließlich auf eigenes Risiko.
+2. **Kosten und Datenvolumen.** Für Kosten durch verbrauchtes Datenvolumen, Roaming oder Tarif-Überschreitungen bist du selbst verantwortlich – auch dann, wenn ein in WlanMerge eingestelltes Limit nicht oder zu spät greift. Die Verbrauchsanzeige ist eine Schätzung und kann von der Abrechnung deines Anbieters abweichen.
+3. **Vertrags- und Nutzungsbedingungen.** Du bist selbst dafür verantwortlich, die Bedingungen deines Mobilfunk- und Internetanbieters (z. B. Verbote oder Einschränkungen von Tethering) sowie die Nutzungsbedingungen von Spiele-, Download- und anderen Diensten einzuhalten. Mögliche Folgen wie gesperrte Konten, gedrosselte Anschlüsse oder Vertragsstrafen trägst du selbst.
+4. **Keine Zusicherung.** Es wird nicht zugesichert, dass WlanMerge fehlerfrei, ununterbrochen, sicher oder für einen bestimmten Zweck geeignet ist, und auch nicht, dass Downloads schneller werden.
+5. **Haftung.** Eine Haftung der Entwickler und Mitwirkenden für Schäden jeder Art – insbesondere Datenverlust, Netzwerkstörungen, entgangene Gewinne, Schäden an Geräten oder Kosten – ist ausgeschlossen, **soweit das gesetzlich zulässig ist**. Unberührt bleibt die gesetzlich zwingende Haftung, insbesondere bei Vorsatz und grober Fahrlässigkeit sowie bei der Verletzung von Leben, Körper oder Gesundheit.
+6. **Lizenz.** Es gilt die MIT-Lizenz (Datei `LICENSE`). Bei Widersprüchen geht die gesetzlich zwingende Regelung vor; die übrigen Bestimmungen bleiben wirksam.
+
+Mit der Installation oder Nutzung von WlanMerge erkennst du diese Bedingungen an.
+
+## English
+
+**WlanMerge is free software provided “as is”, without warranty of any kind.**
+
+1. **Use at your own risk.** WlanMerge changes your computer's network configuration (virtual network adapter, additional routes) and routes traffic over your internet connections, including mobile data. You use it entirely at your own risk.
+2. **Costs and data usage.** You alone are responsible for any costs caused by data usage, roaming or exceeding your plan – even if a limit configured in WlanMerge does not take effect or takes effect too late. The usage display is an estimate and may differ from your provider's billing.
+3. **Terms of service.** You are responsible for complying with the terms of your mobile and internet provider (e.g. bans or restrictions on tethering) and with the terms of game, download and other services. Any consequences such as banned accounts, throttled connections or contractual penalties are yours alone.
+4. **No guarantees.** There is no guarantee that WlanMerge is free of errors, uninterrupted, secure or fit for a particular purpose, nor that downloads become faster.
+5. **Liability.** The developers and contributors accept no liability for damages of any kind – in particular data loss, network problems, lost profits, damage to devices or costs – **to the extent permitted by law**. Liability that cannot be excluded by law, in particular for intent, gross negligence and injury to life, body or health, remains unaffected.
+6. **License.** The MIT License applies (file `LICENSE`). Where mandatory law conflicts, it prevails; the remaining provisions stay in effect.
+
+By installing or using WlanMerge you accept these terms.

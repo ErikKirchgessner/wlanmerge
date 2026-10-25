@@ -1,0 +1,9 @@
+﻿bin/
+build/bin/
+frontend/node_modules/
+frontend/dist/*
+*.exe
+frontend/wailsjs/
+frontend/package-lock.json
+!frontend/dist/gitkeep
+Weitergabe/

@@ -1,0 +1,10 @@
+# Einheitliche Zeilenenden: Skripte für Linux/macOS müssen LF haben,
+# sonst laufen sie dort nicht.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.nsi text eol=crlf
+*.nsh text eol=crlf
+*.png binary
+*.ico binary
+*.dll binary
+*.exe binary
