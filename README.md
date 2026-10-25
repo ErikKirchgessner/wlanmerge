@@ -3,18 +3,23 @@
 **Mehrere Internetverbindungen bündeln – für schnellere Downloads. Kostenlos, ohne Server. Für Windows 10/11.**
 **Combine several internet connections for faster downloads. Free, no server needed. For Windows 10/11.**
 
+## ⬇️ Download
+
+### [👉 WlanMerge für Windows herunterladen](https://github.com/ErikKirchgessner/wlanmerge/releases/latest/download/WlanMerge-Setup-Windows.exe)
+
+1. Auf den Link oben klicken – die Datei `WlanMerge-Setup-Windows.exe` wird heruntergeladen.
+2. Datei öffnen. Zeigt Windows „Der Computer wurde durch Windows geschützt“: **Weitere Informationen → Trotzdem ausführen**.
+3. Installieren – fertig. WlanMerge startet und schaltet sich selbst ein.
+4. Handy per USB-Kabel anschließen und am Handy **USB-Tethering** einschalten (Handy-WLAN aus).
+
+*English: click the link above, open the file, “More info → Run anyway”, install, connect your phone via USB and turn on USB tethering.*
+
+---
 WlanMerge verteilt die Verbindungen deines PCs auf alle Leitungen, die du hast – zum Beispiel Heim-WLAN **plus** Handy per USB-Tethering. Steam, Battle.net, Epic und Browser-Downloads werden dadurch schneller.
 
 WlanMerge spreads your PC's connections over all the lines you have – e.g. home Wi-Fi **plus** your phone via USB tethering. Steam, Battle.net, Epic and browser downloads get faster.
 
 > ⚠️ **Nutzung auf eigene Gefahr / Use at your own risk** – siehe / see [DISCLAIMER.md](DISCLAIMER.md). Achte auf dein Handy-Datenvolumen und die Bedingungen deines Anbieters. / Mind your mobile data and your provider's terms.
-
-## Download
-
-Unter **Releases** (rechts auf dieser Seite): `WlanMerge-Setup-Windows.exe`.
-Windows warnt, weil das Programm nicht signiert ist: **Weitere Informationen → Trotzdem ausführen**.
-
-Under **Releases** (on the right): `WlanMerge-Setup-Windows.exe`. Windows warns because the app is not signed: **More info → Run anyway**.
 
 ## Funktionen / Features
 
