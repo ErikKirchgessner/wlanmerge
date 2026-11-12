@@ -1,13 +1,14 @@
 package main
 
-// Windows: Ein Programm mit Admin-Rechten (Manifest) – Fenster, Tray-Symbol und
-// Steuerzentrale laufen zusammen.
+// Windows: Ein Programm mit Admin-Rechten (Manifest) in zwei Rollen –
+// Hintergrunddienst und Fenster (siehe main.go).
 //
 // Aufrufe:
 //
-//	WlanMerge.exe              Fenster öffnen
-//	WlanMerge.exe --tray       Autostart: Wächter, wartet auf die Taskleiste und startet --tray-run
-//	WlanMerge.exe --tray-run   nur im Tray starten
+//	WlanMerge.exe              Fenster öffnen (startet den Dienst, falls er nicht läuft)
+//	WlanMerge.exe --tray       Autostart: Wächter, wartet auf die Taskleiste und startet den Dienst
+//	WlanMerge.exe --tray-start wie --tray, aber ohne zu warten (vom Fenster aus)
+//	WlanMerge.exe --tray-run   der Dienst selbst
 //	WlanMerge.exe --restore    Notausschalter: Netzwerk zurücksetzen und beenden
 //	WlanMerge.exe --setup      Windows-Aufgaben einrichten (macht der Installer)
 //	WlanMerge.exe --uninstall  alles entfernen (macht der Deinstaller)
@@ -21,31 +22,19 @@ import (
 	"time"
 	"unsafe"
 
-	toast "git.sr.ht/~jackmordaunt/go-toast/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	wopts "github.com/wailsapp/wails/v2/pkg/options/windows"
-	wr "github.com/wailsapp/wails/v2/pkg/runtime"
 	"golang.org/x/sys/windows"
 
 	"wlanmerge/internal/autostart"
 	"wlanmerge/internal/config"
 	"wlanmerge/internal/i18n"
 	"wlanmerge/internal/nativehost"
+	"wlanmerge/internal/remote"
 	"wlanmerge/internal/safety"
-	"wlanmerge/internal/service"
-	"wlanmerge/internal/sound"
-	"wlanmerge/internal/trayicon"
 )
 
-const (
-	osName     = "Windows"
-	trayHint   = "Du findest es unten rechts in der Taskleiste (evtl. unter ^). Beenden: Rechtsklick auf das Symbol → Beenden."
-	closeQuits = false // Schließen versteckt ins Tray
-	notifyHere = true  // Limit-Meldungen zeigt dieses Programm
-)
+const trayHint = "Du findest es unten rechts in der Taskleiste (evtl. unter ^). Beenden: Rechtsklick auf das Symbol → Beenden."
 
 func platformMain(args []string) {
-	tray := false
 	for _, a := range args {
 		switch a {
 		case "--restore":
@@ -64,27 +53,59 @@ func platformMain(args []string) {
 			os.Remove(filepath.Join(exeDir(), "wintun.dll"))
 			return
 		case "--tray":
-			supervise(logFile)
+			supervise(logFile, true)
+			return
+		case "--tray-start":
+			supervise(logFile, false)
 			return
 		case "--tray-run":
-			tray = true
+			runCore()
+			return
 		}
 	}
-	runGUI(tray, service.New())
+	runWindow()
 }
 
-func platformOptions(o *options.App) {
-	o.Windows = &wopts.Options{Theme: wopts.SystemDefault}
-}
-
-func platformStartup(a *App) {
-	s := a.svc.(*service.Service)
-	go nativehost.Serve(a.ctx, s.HandleOffer) // Angebote der Browser-Erweiterung
-	setupNotifications(a)
-	go a.runTray()
-	if s.Config().AutoConnect {
-		go func() { autoConnect(s); a.emit() }()
+// runWindow öffnet das Fenster. Läuft der Dienst noch nicht (z. B. Autostart
+// aus oder vorher beendet), wird er zuerst gestartet.
+func runWindow() {
+	c := &remote.Client{}
+	if !c.Alive() {
+		if err := startService(); err != nil {
+			log.Print("Dienst starten: ", err)
+		}
+		for deadline := time.Now().Add(20 * time.Second); !c.Alive(); time.Sleep(100 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				messageBox("WlanMerge", i18n.T("WlanMerge konnte nicht gestartet werden. Details stehen in wlanmerge.log im Ordner C:\\ProgramData\\WlanMerge."))
+				return
+			}
+		}
 	}
+	runGUI(c)
+}
+
+// startService startet den Wächter samt Dienst als eigenständigen Prozess, der
+// weiterläuft, wenn das Fenster geschlossen wird.
+func startService() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	const flags = windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS
+	cmd := exec.Command(exe, "--tray-start")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags | windows.CREATE_BREAKAWAY_FROM_JOB}
+	if err := cmd.Start(); err == nil {
+		return nil
+	}
+	cmd = exec.Command(exe, "--tray-start") // Job erlaubt kein Ausbrechen – dann eben so
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
+	return cmd.Start()
+}
+
+func messageBox(title, text string) {
+	t, _ := windows.UTF16PtrFromString(title)
+	m, _ := windows.UTF16PtrFromString(text)
+	windows.MessageBox(0, m, t, windows.MB_OK|windows.MB_ICONWARNING)
 }
 
 func exeDir() string {
@@ -96,39 +117,12 @@ func extensionDir() string { return filepath.Join(exeDir(), "extension") }
 
 func openFolder(p string) { exec.Command("explorer.exe", p).Start() }
 
-// ---------- Benachrichtigungen ----------
-
-var iconPath string
-
-// setupNotifications meldet WlanMerge bei Windows für Benachrichtigungen an
-// und legt das Logo ab, das in der Meldung angezeigt wird.
-func setupNotifications(a *App) {
-	wr.InitializeNotifications(a.ctx)
-	p := filepath.Join(os.TempDir(), "wlanmerge-logo.png")
-	if os.WriteFile(p, trayicon.Logo, 0o644) == nil {
-		iconPath = p
+// openURL öffnet einen Link im normalen Browser. Über explorer.exe läuft der
+// Browser mit normalen Rechten, nicht mit den Admin-Rechten von WlanMerge.
+func openURL(u string) {
+	if u != "" {
+		exec.Command("explorer.exe", u).Start()
 	}
-}
-
-// notify zeigt eine Windows-Benachrichtigung. Die Meldung selbst ist stumm;
-// mit withSound spielt stattdessen unser eigener Klang.
-func notify(title, body string, withSound bool) {
-	if withSound {
-		sound.Play()
-	}
-	exe, _ := os.Executable()
-	n := toast.Notification{
-		AppID: filepath.Base(exe), // so hat Wails die App bei Windows angemeldet
-		Title: title,
-		Body:  body,
-		Icon:  iconPath,
-		Audio: toast.Silent,
-	}
-	n.Push()
-}
-
-func notifyLimit(text string) {
-	notify(i18n.T("Datenlimit erreicht"), i18n.Tf("%s. Das WLAN läuft normal weiter.", text), true)
 }
 
 // ---------- Tray-Symbol nach dem Anmelden ----------

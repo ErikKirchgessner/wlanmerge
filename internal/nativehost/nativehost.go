@@ -49,6 +49,10 @@ type Reply struct {
 
 // Validate prüft eine Nachricht streng (WlanMerge läuft mit Admin-Rechten).
 func (o *Offer) Validate() error {
+	if o.Type == "open" { // Fenster öffnen (Desktop-Symbol, Klick auf eine Benachrichtigung)
+		*o = Offer{Type: "open"} // alles andere wird ignoriert
+		return nil
+	}
 	if o.Type == "drop" { // Browser war schneller fertig: Angebot verwerfen
 		if len(o.Token) != 32 || strings.Trim(o.Token, "0123456789abcdef") != "" {
 			return errors.New("ungültiger Schlüssel")
@@ -139,6 +143,10 @@ func Forward(o Offer) Reply {
 	}
 	return r
 }
+
+// OpenWindow bittet den laufenden Dienst, das Fenster zu öffnen. false: Der
+// Dienst läuft nicht (dann muss WlanMerge selbst gestartet werden).
+func OpenWindow() bool { return Forward(Offer{Type: "open"}).Accept }
 
 // manifest ist die Anmeldung beim Browser (Chrome, Edge, Chromium, Brave).
 func manifest(hostPath string) []byte {

@@ -35,6 +35,9 @@ const I = {
   one: svg('<path d="M4 12h16"/>'),
   gauge: svg('<path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>'),
   reset: svg('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>'),
+  chart: svg('<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M8 17v-5"/><path d="M13 17V8"/><path d="M18 17v-9"/>'),
+  check: svg('<path d="M20 6 9 17l-5-5"/>', 2.6),
+  up: svg('<path d="M12 19V5"/><path d="m5 12 7-7 7 7"/>', 2.4),
 };
 
 // ---------- Formatierung ----------
@@ -50,7 +53,16 @@ const linesText = (n) => (n === 1 ? t("1 Leitung") : t("{n} Leitungen", { n }));
 const mbit = (bps) => nf1.format((bps * 8) / 1e6);
 const bytes = (b) => b >= 1e9 ? `${nf2.format(b / 1e9)} GB`
   : b >= 1e6 ? `${nf0.format(b / 1e6)} MB` : `${nf0.format(b / 1e3)} KB`;
-const kindIcon = (k) => k === "WLAN" ? I.wifi : k.startsWith("Handy") ? I.phone : I.lan;
+// Sekunden als "12 s", "8 min" oder "1 h 20 min"
+const dur = (s) => {
+  s = Math.round(s || 0);
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  const m = Math.round(s / 60);
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+const isPhone = (k) => k.startsWith("Handy");
+const kindIcon = (k) => k === "WLAN" ? I.wifi : isPhone(k) ? I.phone : I.lan;
 const STATE = { ok: ["Aktiv", "ok"], "gestört": ["Gestört", "warn"], limit: ["Limit erreicht", "bad"], aus: ["Aus", ""] };
 
 // ---------- Zustand ----------
@@ -60,9 +72,11 @@ let lastEventSeen = Date.now();
 let bannerTimer = null;
 let editingLimit = null;
 let shownError = false;
+let sparkMax = 1;      // Skala der Kurve (sinkt langsam, damit sie nicht springt)
 
 // ---------- Titelleiste ----------
 $("#btn-settings").innerHTML = I.gear;
+$("#btn-stats").innerHTML = I.chart;
 $("#btn-min").innerHTML = I.min;
 $("#btn-close").innerHTML = I.x;
 $("#banner-close").innerHTML = I.x;
@@ -70,15 +84,26 @@ $("#power").innerHTML = I.power;
 $("#btn-min").onclick = () => api.Minimise();
 $("#btn-close").onclick = () => api.Hide();
 $("#btn-settings").onclick = () => showView(view === "settings" ? "main" : "settings");
+$("#btn-stats").onclick = () => showView(view === "stats" ? "main" : "stats");
+$("#update-chip").onclick = () => {
+  const u = S?.state.update;
+  if (!u) return;
+  api.OpenURL(u.download || u.url); // lädt den neuen Installer im Browser herunter
+  banner(t(u.download ? "Der neue Installer wird heruntergeladen – danach einfach starten." : "Die Download-Seite wurde im Browser geöffnet."));
+};
 $("#banner-close").onclick = () => $("#banner").classList.add("hidden");
 
-// Zwei Ansichten: Start und Einstellungen
+// Drei Ansichten: Start, Statistik und Einstellungen
 let view = "main";
 function showView(v) {
   view = v;
-  for (const n of ["main", "settings"]) $(`#view-${n}`).classList.toggle("hidden", n !== v);
+  for (const n of ["main", "stats", "settings"]) $(`#view-${n}`).classList.toggle("hidden", n !== v);
   setHTML($("#btn-settings"), v === "settings" ? I.back : I.gear);
+  setHTML($("#btn-stats"), v === "stats" ? I.back : I.chart);
   $("#btn-settings").title = t(v === "settings" ? "Zurück" : "Einstellungen");
+  $("#btn-stats").title = t(v === "stats" ? "Zurück" : "Statistik");
+  $("#btn-stats").classList.toggle("hidden", v === "settings");
+  $("#btn-settings").classList.toggle("hidden", v === "stats");
   if (S) render();
 }
 const showSettings = (on) => showView(on ? "settings" : "main");
@@ -106,7 +131,7 @@ function applyTheme(th) {
 const monsterPress = initMonster($("#power-wrap"));
 $("#power").onclick = () => {
   if (S?.state.busy || busyClick) return;
-  const turningOn = !S?.state.on;
+  const turningOn = !S?.state.want; // "an" heißt auch: pausiert, wartet auf zweite Leitung
   monsterPress(turningOn, () => {
     const p = $("#power");
     p.classList.add("pressed");
@@ -133,38 +158,140 @@ function render() {
   const st = S.state;
   applyTheme(st.theme || "system");
 
-  const busy = st.busy || (busyClick && !st.on);
+  const busy = st.busy || (busyClick && !st.want);
+  const paused = st.paused && !busy;
   const p = $("#power");
   p.classList.toggle("on", st.on);
+  p.classList.toggle("paused", paused);
   p.classList.toggle("busy", busy);
-  setProp(p, "title", t(st.on ? "Ausschalten" : "Einschalten"));
+  setProp(p, "title", t(st.want ? "Ausschalten" : "Einschalten"));
 
   const status = $("#status");
-  setText(status, t(busy ? "Verbinde …" : st.on ? "Aktiv" : "Aus"));
+  setText(status, t(busy ? "Verbinde …" : st.on ? "Aktiv" : paused ? "Pausiert" : "Aus"));
   status.classList.toggle("on", st.on);
+  status.classList.toggle("paused", paused);
   const active = st.links.filter((l) => l.state === "ok").length;
   setHTML($("#speed"), st.on ? `${mbit(st.rxRate)}<small>Mbit/s</small>` : "");
   setText($("#substatus"), st.on
     ? `↑ ${mbit(st.txRate)} Mbit/s · ${linesText(active)}${st.publicIp ? " · IP " + st.publicIp : ""}`
+    : paused ? t(active ? "Nur eine Leitung hat Internet – geht von selbst weiter, sobald eine zweite da ist" : "Kein Internet – geht von selbst weiter, sobald eine Leitung da ist")
     : st.links.length > 1 ? t("{n} Leitungen bereit", { n: st.links.length }) : st.links.length === 1 ? t("1 Leitung gefunden – schließ eine zweite an") : "");
+  renderSpark(st);
+
+  const chip = $("#update-chip");
+  chip.classList.toggle("hidden", !st.update);
+  if (st.update) {
+    setHTML(chip, `${I.up}<span>${esc(t("Update {v}", { v: st.update.version }))}</span>`);
+    setProp(chip, "title", t("Neue Version {v} herunterladen", { v: st.update.version }) + (st.update.download ? "" : " (GitHub)"));
+  }
 
   // Fehler bleiben stehen; neue Ereignisse kurz einblenden
   if (st.error) banner(st.error, true, true);
   else if (shownError) $("#banner").classList.add("hidden"); // Fehler ist behoben
   shownError = !!st.error;
   const fresh = (st.events || []).filter((e) => new Date(e.time).getTime() > lastEventSeen);
+  const loud = fresh.filter((e) => e.kind !== "quiet"); // Pause/Fortsetzen nur im Protokoll
   if (fresh.length) {
     lastEventSeen = Math.max(...fresh.map((e) => new Date(e.time).getTime()));
-    const last = fresh[fresh.length - 1];
-    if (!st.error) banner(last.text, last.kind === "limit" || /gestört|disrupted/.test(last.text));
+    const last = loud[loud.length - 1];
+    if (last && !st.error) banner(last.text, last.kind === "limit" || /gestört|disrupted/.test(last.text));
   }
 
   renderLinks(st);
   renderActive(st);
   renderSpeed(st);
-  renderSettings();
+  if (view === "stats") renderStats(st);
+  if (view === "settings") renderSettings();
+  renderOnboard(st);
 }
 
+// ---------- Live-Kurve (letzte 60 s) ----------
+// Ein einziger SVG-Pfad, einmal pro Sekunde neu – keine Animation.
+const sparkEls = { area: $("#spark-area"), total: $("#spark-total"), main: $("#spark-main") };
+function renderSpark(st) {
+  const hist = st.history || [];
+  const show = st.on && hist.length > 1;
+  $("#spark").classList.toggle("hidden", !show);
+  if (!show) return;
+  const peak = Math.max(1, ...hist.map((p) => p.total));
+  sparkMax = Math.max(peak, sparkMax * 0.96);
+  const W = 240, H = 44, n = hist.length;
+  const x = (i) => ((i / (n - 1)) * W).toFixed(1);
+  const y = (v) => (H - 2 - (v / sparkMax) * (H - 6)).toFixed(1);
+  const path = (k) => hist.map((p, i) => `${i ? "L" : "M"}${x(i)},${y(p[k])}`).join("");
+  const tot = path("total");
+  sparkEls.area.setAttribute("d", `${tot}L${W},${H}L0,${H}Z`);
+  sparkEls.total.setAttribute("d", tot);
+  sparkEls.main.setAttribute("d", path("main"));
+  const prim = st.links.find((l) => l.primary);
+  setText($("#spark-main-lbl"), t("nur {name}", { name: prim ? t(prim.name) : t("Hauptleitung") }));
+}
+
+// ---------- Statistik ----------
+// Jede Leitung hat eine feste Farbe (Reihenfolge wie die Kacheln). Tage von
+// vor 1.2.0 kennen nur "Hauptleitung" und "zusätzlich" (~main/~extra).
+const PALETTE = ["#4f6bff", "#14c8b4", "#f59e0b", "#a78bfa", "#f472b6", "#94a3b8"];
+const OLD = { "~main": ["Hauptleitung", "color-mix(in srgb, var(--accent) 45%, var(--surface-2))"], "~extra": ["zusätzlich", "color-mix(in srgb, var(--accent-2) 45%, var(--surface-2))"] };
+const lineLabel = (n) => OLD[n] ? t(OLD[n][0]) : t(n);
+function lineOrder(st, names) {
+  const pos = new Map(st.links.map((l, i) => [l.name, i]));
+  const tot = (n) => (st.stats?.month?.lines || {})[n] || 0;
+  return [...names].filter((n) => !OLD[n]).sort((a, b) =>
+    (pos.has(a) ? pos.get(a) : 99) - (pos.has(b) ? pos.get(b) : 99) || tot(b) - tot(a) || a.localeCompare(b));
+}
+const chart = $("#chart");
+function renderStats(st) {
+  const s = st.stats || {};
+  const day = (d) => ({ main: d?.main || 0, extra: d?.extra || 0, saved: d?.saved || 0, lines: d?.lines || {} });
+  const td = day(s.today), mo = day(s.month);
+  const dm = new Intl.DateTimeFormat(locale(), { day: "2-digit", month: "2-digit" });
+  const periodLbl = s.since ? t("Seit dem {d}", { d: dm.format(new Date(s.since + "T12:00:00")) }) : t("Letzte 30 Tage");
+  setText($("#k-today"), bytes(td.main + td.extra));
+  setText($("#k-today-x"), t("davon {v} zusätzlich", { v: bytes(td.extra) }));
+  setText($("#k-month-lbl"), periodLbl);
+  setText($("#k-month"), bytes(mo.main + mo.extra));
+  setText($("#k-month-x"), t("davon {v} zusätzlich", { v: bytes(mo.extra) }));
+  setText($("#k-saved"), dur(mo.saved));
+  setText($("#k-saved-x"), t("heute {v}", { v: dur(td.saved) }));
+
+  // Farben: alle Leitungen aus Zeitraum und Balken, in fester Reihenfolge
+  const days = s.days || [];
+  const names = new Set(Object.keys(mo.lines));
+  days.forEach((d) => Object.keys(d.lines || {}).forEach((n) => names.add(n)));
+  const order = lineOrder(st, names);
+  const color = (n) => OLD[n] ? OLD[n][1] : PALETTE[order.indexOf(n) % PALETTE.length];
+  const olds = Object.keys(OLD).filter((n) => names.has(n));
+
+  // Je Leitung im Zeitraum
+  setText($("#per-line-lbl"), t("Je Leitung · {p}", { p: periodLbl }));
+  const sum = Math.max(1, mo.main + mo.extra);
+  const rows = [...order, ...olds].filter((n) => mo.lines[n] > 0).sort((a, b) => mo.lines[b] - mo.lines[a]);
+  setHTML($("#per-line"), rows.length ? rows.map((n) => {
+    const v = mo.lines[n];
+    return `<div class="pl-row"><i class="pl-dot" style="background:${color(n)}"></i><span class="pl-n">${esc(lineLabel(n))}</span>` +
+      `<div class="bar pl-bar"><i style="transform:scaleX(${v / sum});background:${color(n)}"></i></div>` +
+      `<b class="pl-v">${bytes(v)}</b><span class="pl-p">${nf0.format((v / sum) * 100)} %</span></div>`;
+  }).join("") : `<div class="pl-empty">${esc(t("Noch nichts gezählt – die Statistik füllt sich, sobald WlanMerge an ist."))}</div>`);
+
+  // 14-Tage-Balken, je Leitung gestapelt
+  if (chart.children.length !== days.length) {
+    chart.innerHTML = days.map(() => `<div class="col"><div class="stack"></div><span></span></div>`).join("");
+  }
+  const max = Math.max(1, ...days.map((d) => d.main + d.extra));
+  const wd = new Intl.DateTimeFormat(locale(), { weekday: "short" });
+  const stackOrder = [...olds].reverse().concat([...order].reverse()); // Hauptleitung unten
+  days.forEach((d, i) => {
+    const col = chart.children[i];
+    const date = new Date(d.date + "T12:00:00");
+    const ls = d.lines || {};
+    setHTML($(".stack", col), stackOrder.filter((n) => ls[n] > 0)
+      .map((n) => `<i style="height:${((ls[n] / max) * 100).toFixed(2)}%;background:${color(n)}"></i>`).join(""));
+    setText($("span", col), i === days.length - 1 ? t("heute") : wd.format(date));
+    const parts = Object.keys(ls).filter((n) => ls[n] > 0).map((n) => `${lineLabel(n)} ${bytes(ls[n])}`);
+    setProp(col, "title", `${dm.format(date)}: ${bytes(d.main + d.extra)}${parts.length ? " · " + parts.join(", ") : ""}`);
+  });
+  setHTML($("#chart-legend"), [...order, ...olds].map((n) => `<span class="lg"><i style="background:${color(n)}"></i>${esc(lineLabel(n))}</span>`).join(""));
+}
 const cards = new Map();
 
 function renderLinks(st) {
@@ -414,6 +541,10 @@ function applyLang(l, os) {
   $("#legal-body").innerHTML = DISCLAIMER[getLang()];
   cards.forEach((c) => c.el.remove()); // Kacheln mit neuen Texten neu aufbauen
   cards.clear();
+  fillObReset();
+  $("#ob-legal-text").innerHTML = DISCLAIMER[getLang()];
+  $("#app-add").placeholder = t("z. B. steam.exe");
+  $("#btn-stats").title = t(view === "stats" ? "Zurück" : "Statistik");
   $("#links").__html = null;
   $("#st-btn").__html = null;
   if (S) render();
@@ -424,31 +555,188 @@ function renderSettings() {
   const st = S.state;
   setProp($("#set-autoconnect"), "checked", st.autoConnect);
   setProp($("#set-autostart"), "checked", S.autostart);
+  setProp($("#set-autopause"), "checked", st.autoPause);
   setProp($("#set-rebalance"), "checked", st.rebalance);
   if (document.activeElement !== resetSel) resetSel.value = String(st.resetDay ?? 1);
   setProp($("#set-dl-enabled"), "checked", st.dlEnabled);
+  setProp($("#set-appfilter"), "checked", st.appFilter);
+  setProp($("#set-update"), "checked", st.updateCheck);
+  setText($("#version"), t("Version {v} · MIT-Lizenz", { v: st.version || "–" }));
   $("#lang-de").classList.toggle("on", getLang() === "de");
   $("#lang-en").classList.toggle("on", getLang() === "en");
+  renderApps(st);
 }
 
+// ---------- Programme, die das Handy nutzen dürfen ----------
+const appRows = new Map();
+// Anzeigename: bekannte Programme mit Namen, sonst Dateiname ohne ".exe"
+const appName = (a) => a.label ? a.label
+  : a.name === "browser-downloads" ? t("Browser-Downloads (über WlanMerge)")
+  : a.name === "system" ? t("Windows (System)")
+  : a.name.replace(/\.exe$/, "").replace(/^./, (c) => c.toUpperCase());
+const appFiles = (a) => a.name === "browser-downloads" || a.name === "system" ? "" : (a.files || [a.name]).join(", ");
+function renderApps(st) {
+  $("#apps").classList.toggle("hidden", !st.appFilter);
+  if (!st.appFilter) return;
+  const list = st.apps || [];
+  const box = $("#app-list");
+  const names = new Set(list.map((a) => a.name));
+  for (const [n, r] of appRows) if (!names.has(n)) { r.remove(); appRows.delete(n); }
+  list.forEach((a, i) => {
+    let r = appRows.get(a.name);
+    if (!r) {
+      r = h("label", "app", `<input type="checkbox" class="check"/><span class="an"></span><small class="af"></small><span class="ab"></span>`);
+      $("input", r).onchange = (e) => api.SetPhoneApp(a.name, e.target.checked);
+      appRows.set(a.name, r);
+    }
+    if (box.children[i] !== r) box.insertBefore(r, box.children[i] || null);
+    setText($(".an", r), appName(a));
+    setText($(".af", r), appFiles(a));
+    setProp(r, "title", appFiles(a));
+    setText($(".ab", r), a.bytes ? (a.phone ? t("{v} · davon Handy {p}", { v: bytes(a.bytes), p: bytes(a.phone) }) : bytes(a.bytes)) : "");
+    setProp($("input", r), "checked", a.allowed);
+  });
+}
+const addApp = () => {
+  const inp = $("#app-add");
+  let n = inp.value.trim().toLowerCase();
+  if (!n) return;
+  if (!/\.exe$/.test(n)) n += ".exe";
+  inp.value = "";
+  api.SetPhoneApp(n, true);
+};
+$("#app-add-btn").onclick = addApp;
+$("#app-add").onkeydown = (e) => { if (e.key === "Enter") addApp(); };
+
 $("#set-autoconnect").onchange = (e) => api.SetAutoConnect(e.target.checked);
+$("#set-autopause").onchange = (e) => api.SetAutoPause(e.target.checked);
+$("#set-appfilter").onchange = (e) => api.SetAppFilter(e.target.checked);
+$("#set-update").onchange = (e) => api.SetUpdateCheck(e.target.checked);
+$("#set-issue").onclick = () => api.OpenURL("https://github.com/ErikKirchgessner/wlanmerge/issues/new");
+$("#set-diag").onclick = async () => {
+  const b = $("#set-diag");
+  const err = await api.CopyDiagnose();
+  b.textContent = err ? t("Fehler") : t("Kopiert ✓");
+  b.title = err || "";
+  setTimeout(() => { b.textContent = t("Kopieren"); }, 2500);
+};
 $("#set-autostart").onchange = (e) => api.SetAutostart(e.target.checked);
 $("#set-rebalance").onchange = (e) => api.SetRebalance(e.target.checked);
 resetSel.onchange = () => api.SetResetDay(+resetSel.value);
 $("#set-dl-enabled").onchange = (e) => api.SetDownloadsEnabled(e.target.checked);
-$("#set-ext").onclick =() => { api.OpenExtensionFolder(); $("#ext-help").classList.remove("hidden"); };
+$("#set-ext").onclick = () => { api.OpenExtensionFolder(); $("#ext-help").classList.remove("hidden"); };
 $("#emergency").onclick = async () => {
   const steps = await api.Emergency();
   showSettings(false);
   banner(t("Netzwerk zurückgesetzt: {step}", { step: steps?.length ? steps[steps.length - 1] : t("fertig") }));
 };
 
+// ---------- Einrichtung beim ersten Start ----------
+// 1. Willkommen  2. Handy anschließen (live erkannt)  3. Datenlimit + einschalten
+let obStep = 0;
+let obDone = false; // schon abgeschlossen (bis Go es bestätigt)
+let obAuto = false; // automatisch weiter nach "Handy erkannt" (nur einmal)
+const obReset = $("#ob-resetday");
+const fillObReset = () => {
+  const v = obReset.value;
+  obReset.innerHTML = resetSel.innerHTML;
+  obReset.value = v || String(S?.state.resetDay ?? 1);
+};
+fillObReset();
+const obGo = (n) => {
+  obStep = n;
+  if (n === 2) buildObLimits();
+  if (S) renderOnboard(S.state);
+};
+$("#ob-next0").onclick = () => obGo(1);
+$("#ob-back1").onclick = () => obGo(0);
+$("#ob-next1").onclick = () => obGo(2);
+$("#ob-legal").onclick = () => $("#ob-legal-text").classList.toggle("hidden");
+
+// Für jedes erkannte Handy ein Eingabefeld (einmal beim Betreten von Schritt 3).
+function buildObLimits() {
+  const phones = (S?.state.links || []).filter((l) => isPhone(l.kind));
+  const box = $("#ob-limits");
+  if (!phones.length) {
+    box.innerHTML = `<div class="ob-note">${t("Kein Handy angeschlossen – das Limit kannst du später an der Kachel setzen.")}</div>`;
+    return;
+  }
+  box.innerHTML = phones.map(() => `<label class="ob-row"><span class="ob-n"></span><span class="ob-gb"><input type="number" min="0" step="0.5" class="text-input num"/> GB</span></label>`).join("");
+  box.querySelectorAll(".ob-row").forEach((row, i) => {
+    const l = phones[i];
+    row.dataset.name = l.name;
+    $(".ob-n", row).textContent = l.name;
+    $("input", row).value = l.limit > 0 ? +(l.limit / 1e9).toFixed(2) : "";
+    $("input", row).placeholder = t("kein Limit");
+  });
+  obReset.value = String(S?.state.resetDay ?? 1);
+}
+
+const finishOb = (turnOn) => {
+  $("#ob-limits").querySelectorAll(".ob-row[data-name]").forEach((row) => {
+    const gb = Math.max(0, parseFloat(String($("input", row).value).replace(",", ".")) || 0);
+    api.SetLimitGB(row.dataset.name, gb);
+  });
+  api.SetResetDay(+obReset.value);
+  obDone = true;
+  if (turnOn) busyClick = true;
+  api.FinishOnboarding(turnOn);
+  render();
+};
+$("#ob-finish").onclick = () => finishOb(true);
+$("#ob-later").onclick = () => finishOb(false);
+
+function renderOnboard(st) {
+  const show = !st.onboarded && !obDone;
+  $("#onboard").classList.toggle("hidden", !show);
+  if (!show) return;
+  document.querySelectorAll(".ob-step").forEach((s) => s.classList.toggle("active", +s.dataset.step === obStep));
+  document.querySelectorAll(".ob-dots i").forEach((d, i) => d.classList.toggle("on", i <= obStep));
+  if (obStep !== 1) return;
+  const phones = st.links.filter((l) => isPhone(l.kind) && l.state === "ok");
+  const others = st.links.filter((l) => !isPhone(l.kind));
+  let html = phones.length
+    ? `<div class="ob-found ok"><span class="ob-ic">${I.check}</span><b>${esc(t("Handy erkannt"))}</b><small></small></div>`
+    : `<div class="ob-found"><span class="ob-ic">${I.phone}</span><b>${esc(t("Noch kein Handy erkannt"))}</b><small>${esc(t("Das geht meist in wenigen Sekunden, nachdem USB-Tethering an ist."))}</small></div>`;
+  if (others.length) html += `<div class="ob-note">${esc(t("Außerdem gefunden: {list}", { list: others.map((l) => t(l.name)).join(", ") }))}</div>`;
+  const box = $("#ob-detect");
+  setHTML(box, html);
+  if (phones.length) setText($(".ob-found small", box), phones.map((l) => l.name).join(", "));
+  setText($("#ob-next1"), t(phones.length ? "Weiter" : "Ohne Handy weiter"));
+  if (phones.length && !obAuto) {
+    obAuto = true; // kurz das grüne Häkchen zeigen, dann weiter
+    setTimeout(() => { if (obStep === 1) obGo(2); }, 1500);
+  }
+}
+
+// ---------- Tastatur: Esc = zurück ----------
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented) return;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return; // Eingabefelder haben ihr eigenes Esc
+  if (!$("#onboard").classList.contains("hidden")) return;
+  if (view !== "main") showView("main");
+  else if (stOpen) { stOpen = false; render(); }
+  else $("#banner").classList.add("hidden");
+});
+
+// ---------- Minimiert: schlafen ----------
+// Minimiert sieht niemand hin – Animationen anhalten. Beim Wiederherstellen
+// sofort den aktuellen Stand holen. (Bündelung und Tray laufen im Dienst
+// davon unberührt weiter.)
+const sleep = (on) => {
+  document.documentElement.classList.toggle("asleep", on);
+  if (!on) Promise.resolve(api.GetState()).then(onState);
+};
+document.addEventListener("visibilitychange", () => sleep(document.hidden));
+runtime.EventsOn("sleep", sleep);
+
 // ---------- Start ----------
 // Feste Texte einmal sofort (Deutsch), damit nichts leer bleibt
 applyStatic();
 $("#legal-body").innerHTML = DISCLAIMER.de;
+$("#ob-legal-text").innerHTML = DISCLAIMER.de;
 const onState = (s) => {
-  if (s.state.busy || s.state.error || s.state.on !== S?.state.on) busyClick = false;
+  if (s.state.busy || s.state.error || s.state.want !== S?.state.want) busyClick = false;
   S = s;
   applyLang(s.state.lang, s.os); // tut nichts, wenn sich nichts geändert hat
   render();

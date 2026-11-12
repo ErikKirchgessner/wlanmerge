@@ -40,4 +40,18 @@ func TestPipeRoundTrip(t *testing.T) {
 		t.Fatalf("ungültige Nachricht kam bei der App an: %+v", o)
 	default:
 	}
+	// "Fenster öffnen" kommt an – aber ohne irgendwelche mitgeschickten Daten.
+	if !Forward(Offer{Type: "open", URL: "https://boese.example", Cookies: "x"}).Accept {
+		t.Fatal("open wurde abgelehnt")
+	}
+	if o := <-got; o != (Offer{Type: "open"}) {
+		t.Fatalf("open darf nichts weiter enthalten: %+v", o)
+	}
+}
+
+func TestOpenWithoutService(t *testing.T) {
+	PipeName = `\\.\pipe\WlanMerge-Test-` + t.Name() // niemand hört zu
+	if OpenWindow() {
+		t.Fatal("ohne laufenden Dienst muss OpenWindow false liefern")
+	}
 }

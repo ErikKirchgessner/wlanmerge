@@ -85,7 +85,8 @@ func TestQUICIsDistributedButGamesStay(t *testing.T) {
 	b, wlan, phone := testBalancer(t, config.Default())
 	wlan.activeTCP.Store(20)
 	quic := &M.Metadata{Network: M.UDP, DstIP: netip.MustParseAddr("8.8.4.4"), DstPort: 443}
-	if c, pinned := b.candidates(quic, true); pinned || c[0] != phone {
+	b.markHot(quic.DstIP) // von dort läuft gerade ein Download
+	if c, pinned := b.candidates(quic, true, ""); pinned || c[0] != phone {
 		t.Fatal("QUIC (UDP 443) soll verteilt werden")
 	}
 	game := &M.Metadata{Network: M.UDP, DstIP: netip.MustParseAddr("8.8.4.4"), DstPort: 3074}
@@ -101,11 +102,12 @@ func TestSharedCDNAddressNotPinned(t *testing.T) {
 	ip := netip.MustParseAddr("23.1.2.3")
 	m := &M.Metadata{Network: M.TCP, DstIP: ip, DstPort: 443}
 	b.dns.Learn(dnsAnswer(t, "store.steampowered.com", ip))
-	if c, pinned := b.candidates(m, false); !pinned || c[0] != wlan {
+	if c, pinned := b.candidates(m, false, ""); !pinned || c[0] != wlan {
 		t.Fatal("reine Shop-IP soll auf der Hauptleitung bleiben")
 	}
 	b.dns.Learn(dnsAnswer(t, "cdn.steamcontent.example", ip)) // dieselbe CDN-IP liefert auch Downloads
-	if c, pinned := b.candidates(m, false); pinned || c[0] != phone {
+	b.markHot(ip)
+	if c, pinned := b.candidates(m, false, ""); pinned || c[0] != phone {
 		t.Fatal("geteilte CDN-IP darf Downloads nicht festhalten")
 	}
 }

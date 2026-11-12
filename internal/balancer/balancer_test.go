@@ -33,7 +33,7 @@ func testBalancer(t *testing.T, cfg *config.Config) (*Balancer, *Link, *Link) {
 	return b, wlan, phone
 }
 
-func cands(b *Balancer, m *M.Metadata, udp bool) []*Link { c, _ := b.candidates(m, udp); return c }
+func cands(b *Balancer, m *M.Metadata, udp bool) []*Link { c, _ := b.candidates(m, udp, ""); return c }
 func first(b *Balancer, m *M.Metadata, udp bool) *Link   { return cands(b, m, udp)[0] }
 
 var meta = &M.Metadata{Network: M.TCP, DstIP: netip.MustParseAddr("93.184.216.34"), DstPort: 443}
@@ -44,6 +44,7 @@ func simulate(b *Balancer, n int) map[*Link]int {
 	for i := 0; i < n; i++ {
 		l := first(b, meta, false)
 		l.activeTCP.Add(1)
+		b.dstAdd(meta.DstIP, 1) // wie DialContext: offene Verbindung zu diesem Ziel
 		got[l]++
 	}
 	return got
@@ -129,7 +130,7 @@ func TestLoginAndGamesUsePrimary(t *testing.T) {
 	ip := netip.MustParseAddr("1.2.3.4")
 	b.dns.Learn(dnsAnswer(t, "eu.actual.battle.net", ip))
 	login := &M.Metadata{Network: M.TCP, DstIP: ip, DstPort: 443}
-	if c, pinned := b.candidates(login, false); !pinned || c[0] != wlan {
+	if c, pinned := b.candidates(login, false, ""); !pinned || c[0] != wlan {
 		t.Fatal("Battle.net-Login muss auf der Hauptleitung bleiben")
 	}
 	game := &M.Metadata{Network: M.UDP, DstIP: netip.MustParseAddr("8.8.4.4"), DstPort: 3074}
@@ -187,5 +188,103 @@ func TestHealthSkipsLinesWithTraffic(t *testing.T) {
 	b.checkHealth(context.Background())
 	if idle.hcLast != before {
 		t.Fatal("Leitung ohne Verbindungen wurde zu früh wieder geprüft")
+	}
+}
+
+// Surfen: Einzelne Verbindungen gehen über die feste Leitung (bester Ping, kein
+// Handy-Datenvolumen) – auch wenn die Zählung das Handy vorziehen würde. Erst
+// was nach Download aussieht, wird verteilt.
+func TestSurfingStaysOnMainLine(t *testing.T) {
+	b, wlan, phone := testBalancer(t, config.Default())
+	wlan.activeTCP.Store(20)
+	site := &M.Metadata{Network: M.TCP, DstIP: netip.MustParseAddr("198.51.100.7"), DstPort: 443}
+	if first(b, site, false) != wlan {
+		t.Fatal("einzelne Verbindung (Surfen) muss über die feste Leitung gehen")
+	}
+	b.dstAdd(site.DstIP, 2) // zwei Verbindungen zum selben Server sind schon offen
+	if first(b, site, false) != phone {
+		t.Fatal("ab der dritten Verbindung zum selben Ziel ist es ein Download: verteilen")
+	}
+	b.dstAdd(site.DstIP, -2)
+
+	other := &M.Metadata{Network: M.TCP, DstIP: netip.MustParseAddr("198.51.100.8"), DstPort: 443}
+	b.markHot(other.DstIP)
+	if first(b, other, false) != phone {
+		t.Fatal("Ziel mit laufendem Download: neue Verbindungen sofort verteilen")
+	}
+
+	// Feste Leitung ausgelastet → auch einzelne Verbindungen verteilen
+	wlan.mu.Lock()
+	wlan.ewma, wlan.capacity = 2*bulkRate, 2*bulkRate
+	wlan.mu.Unlock()
+	if first(b, site, false) != phone {
+		t.Fatal("bei ausgelasteter Surf-Leitung soll verteilt werden")
+	}
+}
+
+// Programm-Filter: Nur freigegebene Programme dürfen das Handy nutzen – außer
+// es ist die einzige Leitung (nie ohne Internet).
+func TestAppFilter(t *testing.T) {
+	cfg := config.Default()
+	cfg.AppFilter = true
+	cfg.PhoneApps = map[string]bool{"steam.exe": true}
+	b, wlan, phone := testBalancer(t, cfg)
+	wlan.activeTCP.Store(20)
+	dl := &M.Metadata{Network: M.TCP, DstIP: netip.MustParseAddr("198.51.100.9"), DstPort: 443}
+	b.markHot(dl.DstIP)
+
+	if c, _ := b.candidates(dl, false, "steam.exe"); c[0] != phone {
+		t.Fatal("freigegebenes Programm soll das Handy nutzen dürfen")
+	}
+	for _, app := range []string{"chrome.exe", ""} {
+		c, _ := b.candidates(dl, false, app)
+		for _, l := range c {
+			if l == phone {
+				t.Fatalf("nicht freigegebenes Programm %q darf nicht aufs Handy", app)
+			}
+		}
+	}
+	// WLAN fällt weg → Handy ist die einzige Leitung und darf dann benutzt werden
+	wlan.mu.Lock()
+	wlan.state = StateLimit
+	wlan.mu.Unlock()
+	if c, _ := b.candidates(dl, false, "chrome.exe"); len(c) != 1 || c[0] != phone {
+		t.Fatal("ohne andere Leitung muss das Handy als Notlösung bleiben")
+	}
+}
+
+func TestSavedSeconds(t *testing.T) {
+	if s := savedSeconds(10e6, 10e6, 5e6); s != 0.5 {
+		t.Fatalf("ausgelastete Hauptleitung + halb so viel dazu = 0,5 s gespart, bekam %v", s)
+	}
+	if s := savedSeconds(1e6, 10e6, 5e6); s != 0 {
+		t.Fatalf("Hauptleitung nicht ausgelastet: nichts gespart, bekam %v", s)
+	}
+	if s := savedSeconds(10e6, 10e6, 0); s != 0 {
+		t.Fatalf("ohne zweite Leitung nichts gespart, bekam %v", s)
+	}
+}
+
+// Bekannte Programme mit mehreren Dateien sind ein Eintrag; bekannte ohne
+// Verkehr stehen trotzdem in der Auswahl (am Ende).
+func TestAppsGroupsKnownPrograms(t *testing.T) {
+	b, _, _ := testBalancer(t, config.Default())
+	b.appStat("battle.net.exe").bytes.Add(100)
+	b.appStat("agent.exe").bytes.Add(900)
+	b.appStat("agent.exe").phone.Add(400)
+	b.appStat("discord.exe").bytes.Add(50)
+	apps := b.Apps()
+	if apps[0].Name != "battle.net.exe" || apps[0].Label != "Battle.net" || apps[0].Bytes != 1000 || apps[0].Phone != 400 {
+		t.Fatalf("Battle.net nicht zusammengefasst: %+v", apps[0])
+	}
+	var names []string
+	for _, a := range apps {
+		if a.Name == "agent.exe" {
+			t.Fatal("agent.exe darf nicht einzeln erscheinen")
+		}
+		names = append(names, a.Name)
+	}
+	if names[1] != "discord.exe" || names[2] != config.AppDownloads || names[3] != "steam.exe" {
+		t.Fatalf("Reihenfolge falsch: %v", names)
 	}
 }

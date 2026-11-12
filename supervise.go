@@ -38,9 +38,12 @@ func openLog() *os.File {
 	return f
 }
 
-// supervise startet die App mit "--tray-run" und startet sie bei Fehlern neu.
-func supervise(logf *os.File) {
-	waitForTaskbar()
+// supervise startet den Dienst mit "--tray-run" und startet ihn bei Fehlern
+// neu. wait: erst auf die Taskleiste warten (beim Anmelden).
+func supervise(logf *os.File, wait bool) {
+	if wait {
+		waitForTaskbar()
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		log.Print("Autostart: ", err)

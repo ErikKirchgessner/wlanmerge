@@ -1,7 +1,14 @@
 package main
 
+// Das Fenster. Es läuft nur, solange es offen ist, und spricht über remote mit
+// dem Hintergrunddienst (core.go). Schließen beendet das Fenster-Programm
+// ganz – WlanMerge selbst läuft im Tray weiter.
+
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -9,8 +16,9 @@ import (
 	wr "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"wlanmerge/internal/autostart"
-	"wlanmerge/internal/balancer"
+	"wlanmerge/internal/config"
 	"wlanmerge/internal/i18n"
+	"wlanmerge/internal/remote"
 	"wlanmerge/internal/service"
 )
 
@@ -18,189 +26,174 @@ import (
 type UIState struct {
 	State     service.State `json:"state"`
 	Autostart bool          `json:"autostart"`
-	OS        string        `json:"os"` // "Windows", "macOS" oder "Linux" (für Texte)
+	OS        string        `json:"os"`
 }
 
-// App verbindet Fenster und Tray mit der Steuerzentrale.
+// App ist die Brücke zwischen Oberfläche und Dienst.
 // Alle großgeschriebenen Methoden sind aus JavaScript aufrufbar.
 type App struct {
 	ctx       context.Context
-	svc       Backend
-	quitting  atomic.Bool
+	c         *remote.Client
+	closing   atomic.Bool
 	autostart atomic.Bool
-	visible   atomic.Bool // Fenster sichtbar? Sonst sparen wir uns die Anzeige-Updates
 
-	tray trayState // Tray-Symbol im selben Programm (Windows, Linux)
-
-	notifyMu     sync.Mutex
-	lastNotified time.Time
+	emitMu  sync.Mutex
+	lastKey string
+	fails   int
+	asleep  bool // minimiert: Oberfläche hält Animationen an
 }
 
-func NewApp(startHidden bool, b Backend) *App {
-	a := &App{svc: b, lastNotified: time.Now()}
-	a.visible.Store(!startHidden)
-	return a
-}
+func NewApp(c *remote.Client) *App { return &App{c: c} }
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	go func() { a.autostart.Store(autostart.IsEnabled()) }() // kann ~0,1 s dauern – nicht den Start bremsen
-	platformStartup(a)
+	go func() { a.autostart.Store(autostart.IsEnabled()) }() // kann ~0,1 s dauern
 	go a.loop()
 }
 
-// autoConnect schaltet beim Programmstart ein. Direkt nach dem Hochfahren ist
-// das WLAN oft noch nicht verbunden – dann bis zu 5 Minuten geduldig warten.
-func autoConnect(b Backend) {
-	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(5 * time.Second) {
-		if b.Snapshot().On {
-			return // inzwischen von Hand eingeschaltet
-		}
-		if !b.HasLinks() {
-			continue
-		}
-		// Genau ein Versuch: bei einem echten Fehler nicht ständig neu einschalten
-		// (das würde jedes Mal kurz alle Verbindungen unterbrechen).
-		b.Start()
-		return
-	}
-}
+func (a *App) domReady(ctx context.Context) { a.emit(true) }
 
-func (a *App) domReady(ctx context.Context) { a.emit() }
-
-// beforeClose: Schließen-Knopf versteckt nur (Tray bzw. Menüleiste).
-// Beenden geht übers Tray-Menü.
+// beforeClose: Schließen beendet das Fenster; der Dienst erfährt es (für den
+// einmaligen Hinweis "läuft im Hintergrund weiter").
 func (a *App) beforeClose(ctx context.Context) bool {
-	if a.quitting.Load() || closeQuits {
-		return false
+	if !a.closing.Swap(true) {
+		a.c.WindowClosed()
 	}
-	a.Hide()
-	return true
+	return false
 }
 
-func (a *App) shutdown(ctx context.Context) {
-	a.svc.Close() // Windows/Linux: Netzwerk sauber zurücksetzen; macOS: nur Verbindung trennen
-	a.stopTray()
-}
+func (a *App) shutdown(ctx context.Context) { a.c.Close() }
 
-// loop schickt jede Sekunde den Zustand an Fenster und Tray.
+// loop schickt jede Sekunde den Zustand an die Oberfläche.
 func (a *App) loop() {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for range t.C {
-		a.emit()
+		a.emit(false)
 	}
 }
 
-func (a *App) emit() {
-	st := a.svc.Snapshot()
+// emit holt den Zustand vom Dienst und zeigt ihn an. Minimiert sieht niemand
+// hin – dann nur, wenn sich am Ein/Aus-Zustand etwas ändert (damit nach dem
+// Wiederherstellen nie ein veralteter Zustand zu sehen ist). Ist der Dienst
+// weg (z. B. über das Tray beendet), schließt sich das Fenster.
+func (a *App) emit(force bool) {
+	if a.closing.Load() {
+		return // wird gerade geschlossen: nichts mehr anzeigen
+	}
+	st, ok := a.c.Snapshot()
+	a.emitMu.Lock()
+	defer a.emitMu.Unlock()
+	if !ok {
+		if a.fails++; a.fails >= 3 && !a.closing.Swap(true) {
+			wr.Quit(a.ctx)
+		}
+		return
+	}
+	a.fails = 0
 	if st.Lang != "" && st.Lang != i18n.Lang() {
-		i18n.Set(st.Lang) // macOS: Sprache kommt vom Dienst
+		i18n.Set(st.Lang)
 	}
-	// Versteckt oder minimiert: niemand sieht hin, also nichts zeichnen lassen.
-	if a.visible.Load() && !wr.WindowIsMinimised(a.ctx) {
-		wr.EventsEmit(a.ctx, "state", a.uiState(st))
+	key := fmt.Sprint(st.On, st.Want, st.Paused, st.Busy, st.Error, st.Lang, st.Theme)
+	min := wr.WindowIsMinimised(a.ctx)
+	if min != a.asleep {
+		a.asleep = min
+		wr.EventsEmit(a.ctx, "sleep", min)
+		force = force || !min // wiederhergestellt: sofort den aktuellen Stand
 	}
-	a.updateTray(st)
-	if notifyHere {
-		a.notifyLimits(st.Events)
+	if !force && key == a.lastKey && min {
+		return
 	}
+	a.lastKey = key
+	wr.EventsEmit(a.ctx, "state", a.uiState(st))
 }
 
 func (a *App) uiState(st service.State) UIState {
-	return UIState{State: st, Autostart: a.autostart.Load(), OS: osName}
-}
-
-// notifyLimits zeigt für jede neue Limit-Meldung eine Benachrichtigung mit
-// unserem eigenen Klang.
-func (a *App) notifyLimits(events []balancer.Event) {
-	a.notifyMu.Lock()
-	defer a.notifyMu.Unlock()
-	for _, e := range events {
-		if e.Kind != balancer.EventLimit || !e.Time.After(a.lastNotified) {
-			continue
-		}
-		a.lastNotified = e.Time
-		notifyLimit(e.Text)
-	}
-}
-
-// ---------- Aus JavaScript aufrufbar ----------
-
-func (a *App) Show() {
-	a.visible.Store(true)
-	wr.WindowShow(a.ctx)
-	wr.WindowUnminimise(a.ctx)
-	a.emit()
-}
-
-// Hide versteckt das Fenster – WlanMerge läuft im Hintergrund weiter. Beim
-// ersten Mal gibt es einen Hinweis, wo man es wiederfindet.
-func (a *App) Hide() {
-	a.visible.Store(false)
-	if !a.svc.Config().HideHintShown {
-		a.svc.MarkHideHintShown()
-		go notify(i18n.T("WlanMerge läuft im Hintergrund weiter"), i18n.T(trayHint), false)
-	}
-	if closeQuits { // macOS: Menüleisten-Symbol und Dienst laufen weiter, das Fenster darf ganz zu
-		a.Quit()
-		return
-	}
-	wr.WindowHide(a.ctx)
-}
-
-func (a *App) Minimise() { wr.WindowMinimise(a.ctx) }
-
-func (a *App) Quit() {
-	a.quitting.Store(true)
-	wr.Quit(a.ctx)
-}
-
-func (a *App) GetState() UIState { return a.uiState(a.svc.Snapshot()) }
-
-// Toggle schaltet ein oder aus. Fehler stehen danach in state.error.
-func (a *App) Toggle() {
-	if a.svc.Snapshot().On {
-		a.svc.Stop()
-	} else {
-		a.emit() // "verbinde …" sofort anzeigen
-		go func() {
-			a.svc.Start()
-			a.emit()
-		}()
-		return
-	}
-	a.emit()
+	return UIState{State: st, Autostart: a.autostart.Load(), OS: "Windows"}
 }
 
 func (a *App) after(err error) string {
-	a.emit()
+	a.emit(true)
 	if err != nil {
 		return err.Error()
 	}
 	return ""
 }
 
+// ---------- Aus JavaScript aufrufbar ----------
+
+// Show holt das Fenster nach vorn (z. B. wenn es ein zweites Mal geöffnet wird).
+func (a *App) Show() {
+	wr.WindowUnminimise(a.ctx)
+	wr.WindowShow(a.ctx)
+	a.emit(true)
+}
+
+// Hide (Schließen-Knopf) beendet das Fenster – WlanMerge läuft im Tray weiter.
+func (a *App) Hide() {
+	if !a.closing.Swap(true) {
+		a.c.WindowClosed()
+	}
+	wr.Quit(a.ctx)
+}
+
+func (a *App) Minimise() { wr.WindowMinimise(a.ctx) }
+
+func (a *App) GetState() UIState {
+	st, _ := a.c.Snapshot()
+	return a.uiState(st)
+}
+
+// Toggle schaltet ein oder aus. Fehler stehen danach in state.error.
+func (a *App) Toggle() string {
+	st, _ := a.c.Snapshot()
+	return a.after(a.c.SetOn(!st.Want))
+}
+
 func (a *App) SetLimitGB(name string, gb float64) string {
-	return a.after(a.svc.SetLimit(name, int64(gb*1e9)))
+	return a.after(a.c.SetLimit(name, int64(gb*1e9)))
 }
-func (a *App) ResetUsage(name string) string { return a.after(a.svc.ResetUsage(name)) }
+func (a *App) ResetUsage(name string) string { return a.after(a.c.ResetUsage(name)) }
 func (a *App) SetEnabled(name string, on bool) string {
-	return a.after(a.svc.SetDisabled(name, !on))
+	return a.after(a.c.SetDisabled(name, !on))
 }
-func (a *App) SetAutoConnect(on bool) string { return a.after(a.svc.SetAutoConnect(on)) }
-func (a *App) SetResetDay(day int) string    { return a.after(a.svc.SetResetDay(day)) }
-func (a *App) SetRebalance(on bool) string   { return a.after(a.svc.SetRebalance(on)) }
-func (a *App) SetTheme(theme string) string  { return a.after(a.svc.SetTheme(theme)) }
+func (a *App) SetAutoConnect(on bool) string      { return a.after(a.c.SetAutoConnect(on)) }
+func (a *App) SetAutoPause(on bool) string        { return a.after(a.c.SetAutoPause(on)) }
+func (a *App) SetResetDay(day int) string         { return a.after(a.c.SetResetDay(day)) }
+func (a *App) SetRebalance(on bool) string        { return a.after(a.c.SetRebalance(on)) }
+func (a *App) SetTheme(theme string) string       { return a.after(a.c.SetTheme(theme)) }
+func (a *App) SetDownloadsEnabled(on bool) string { return a.after(a.c.SetDownloadsEnabled(on)) }
+func (a *App) SetAppFilter(on bool) string        { return a.after(a.c.SetAppFilter(on)) }
+func (a *App) SetUpdateCheck(on bool) string      { return a.after(a.c.SetUpdateCheck(on)) }
+
+// SetPhoneApp erlaubt oder verbietet einem Programm (z. B. "steam.exe") das Handy.
+func (a *App) SetPhoneApp(name string, allowed bool) string {
+	return a.after(a.c.SetPhoneApp(name, allowed))
+}
+
+// FinishOnboarding schließt die Einrichtung ab und schaltet auf Wunsch ein.
+func (a *App) FinishOnboarding(turnOn bool) string {
+	if err := a.c.SetOnboarded(); err != nil {
+		return a.after(err)
+	}
+	if turnOn {
+		return a.after(a.c.SetOn(true))
+	}
+	return a.after(nil)
+}
 
 // SetLanguage stellt die Sprache um ("de" oder "en").
 func (a *App) SetLanguage(lang string) string {
 	i18n.Set(lang)
-	return a.after(a.svc.SetLang(lang))
+	return a.after(a.c.SetLang(lang))
 }
-func (a *App) Emergency() []string { defer a.emit(); return a.svc.Emergency() }
+
+func (a *App) Emergency() []string { defer a.emit(true); return a.c.Emergency() }
 
 func (a *App) SetAutostart(on bool) string {
+	if config.Sandbox() != "" {
+		return i18n.T("Testmodus: Das Netzwerk wird nicht verändert")
+	}
 	var err error
 	if on {
 		err = autostart.Enable()
@@ -211,21 +204,33 @@ func (a *App) SetAutostart(on bool) string {
 	return a.after(err)
 }
 
-func (a *App) SetDownloadsEnabled(on bool) string { return a.after(a.svc.SetDownloadsEnabled(on)) }
-
-// SpeedTest startet den Speedtest; den Fortschritt liefert das "state"-Ereignis.
-func (a *App) SpeedTest() string { return a.after(a.svc.StartSpeedTest()) }
+// SpeedTest startet den Speedtest; das Ergebnis liefert das "state"-Ereignis.
+func (a *App) SpeedTest() string { return a.after(a.c.StartSpeedTest()) }
 
 // SaveSpeedTest speichert das letzte Ergebnis zum Vergleichen.
-func (a *App) SaveSpeedTest() string { return a.after(a.svc.SaveSpeedTest()) }
+func (a *App) SaveSpeedTest() string { return a.after(a.c.SaveSpeedTest()) }
+
+// CopyDiagnose legt einen technischen Bericht (ohne IP-Adressen und Namen) in
+// die Zwischenablage – zum Einfügen in eine Fehlermeldung.
+func (a *App) CopyDiagnose() string {
+	text := a.c.Diagnose()
+	if text == "" {
+		return i18n.T("WlanMerge läuft nicht")
+	}
+	if err := wr.ClipboardSetText(a.ctx, text); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// OpenURL öffnet einen Link im Browser – nur Seiten auf GitHub (Update, Hilfe).
+func (a *App) OpenURL(u string) string {
+	if !strings.HasPrefix(u, "https://github.com/") {
+		return errors.New("blocked").Error()
+	}
+	openURL(u)
+	return ""
+}
 
 // OpenExtensionFolder öffnet den Ordner der Browser-Erweiterung (zum Laden in Chrome/Edge).
 func (a *App) OpenExtensionFolder() { openFolder(extensionDir()) }
-
-// trayTooltip: kurzer Zustand fürs Tray- bzw. Menüleisten-Symbol.
-func trayTooltip(st service.State) string {
-	if st.On {
-		return i18n.Tf("WlanMerge – aktiv · ↓ %.1f Mbit/s", float64(st.RxRate)*8/1e6)
-	}
-	return i18n.T("WlanMerge – aus")
-}

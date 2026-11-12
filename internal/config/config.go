@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,53 @@ type Config struct {
 	HideHintShown bool `json:"hideHintShown"`
 	// SpeedSaved: gespeichertes Speedtest-Ergebnis zum Vergleichen (nur eins).
 	SpeedSaved *SavedSpeed `json:"speedSaved,omitempty"`
+	// AutoPause: Hat nur eine Leitung Internet, gibt es nichts zu bündeln –
+	// WlanMerge pausiert dann von selbst und macht weiter, sobald eine zweite da ist.
+	AutoPause bool `json:"autoPause"`
+	// AppFilter: Nur die Programme in PhoneApps dürfen Handy-Leitungen benutzen.
+	AppFilter bool `json:"appFilter"`
+	// PhoneApps: Programme (Dateiname klein, z. B. "steam.exe"), die das Handy nutzen dürfen.
+	PhoneApps map[string]bool `json:"phoneApps"`
+	// UpdateCheck: gelegentlich auf GitHub nach einer neuen Version sehen.
+	UpdateCheck bool `json:"updateCheck"`
+	// Onboarded: Die Einrichtung beim ersten Start wurde abgeschlossen.
+	Onboarded bool `json:"onboarded"`
+}
+
+// AppDownloads steht in PhoneApps für Browser-Downloads, die WlanMerge selbst lädt.
+const AppDownloads = "browser-downloads"
+
+// KnownApp ist ein bekanntes Programm. Manche laden über eine zweite Datei
+// herunter (Battle.net über agent.exe) – erlaubt man das Programm, gilt das
+// für alle seine Dateien. Die Liste steht immer in der Auswahl (ohne Haken).
+type KnownApp struct {
+	Label string
+	Exes  []string // Dateinamen klein, die erste ist der Schlüssel
+}
+
+var KnownApps = []KnownApp{
+	{"Steam", []string{"steam.exe"}},
+	{"Battle.net", []string{"battle.net.exe", "agent.exe"}},
+	{"Epic Games", []string{"epicgameslauncher.exe"}},
+	{"EA app", []string{"eadesktop.exe", "eabackgroundservice.exe"}},
+	{"Ubisoft Connect", []string{"upc.exe", "ubisoftconnect.exe"}},
+	{"Riot Client", []string{"riotclientservices.exe", "riotclientux.exe"}},
+	{"Google Chrome", []string{"chrome.exe"}},
+	{"Microsoft Edge", []string{"msedge.exe"}},
+	{"Firefox", []string{"firefox.exe"}},
+}
+
+// KnownGroup liefert das bekannte Programm zu einem Dateinamen (oder nil).
+func KnownGroup(exe string) *KnownApp {
+	exe = strings.ToLower(exe)
+	for i := range KnownApps {
+		for _, e := range KnownApps[i].Exes {
+			if e == exe {
+				return &KnownApps[i]
+			}
+		}
+	}
+	return nil
 }
 
 // SavedSpeed: Bytes/s gesamt und je Leitung.
@@ -80,12 +128,13 @@ func Default() *Config {
 		Rebalance:   true,
 		DLEnabled:   true,
 		Theme:       "system",
+		AutoPause:   true,
+		UpdateCheck: true,
+		PhoneApps:   map[string]bool{},
 	}
 }
 
-// Dir ist der Ordner für Einstellungen, Verbrauch und Status
-// (Windows: %ProgramData%\WlanMerge, macOS: /Library/Application Support/WlanMerge,
-// Linux: ~/.config/wlanmerge).
+// Dir ist der Ordner für Einstellungen, Verbrauch und Status (%ProgramData%\WlanMerge).
 func Dir() string {
 	if d := os.Getenv("WM_DATA_DIR"); d != "" { // für Tests
 		return d
@@ -94,6 +143,27 @@ func Dir() string {
 }
 
 func path() string { return filepath.Join(Dir(), "config.json") }
+
+// Sandbox liefert im Testmodus (WM_DATA_DIR gesetzt) ein kurzes Kürzel, sonst "".
+// Im Testmodus bekommen Pipes und die Einzelinstanz-Sperre dieses Kürzel als
+// Anhang, und das Netzwerk wird nie verändert – so stört ein Testlauf ein
+// installiertes, laufendes WlanMerge nicht.
+func Sandbox() string {
+	d := os.Getenv("WM_DATA_DIR")
+	if d == "" {
+		return ""
+	}
+	var h uint32 = 2166136261
+	for i := 0; i < len(d); i++ {
+		h = (h ^ uint32(d[i])) * 16777619
+	}
+	return "-test-" + strconv.FormatUint(uint64(h), 36)
+}
+
+// MayUsePhone: Darf dieses Programm Handy-Leitungen benutzen?
+func (c *Config) MayUsePhone(app string) bool {
+	return !c.AppFilter || c.PhoneApps[strings.ToLower(app)]
+}
 
 // EnsureDir legt den Datenordner an und schützt ihn (siehe harden).
 func EnsureDir() error {
@@ -118,6 +188,11 @@ func Load() *Config {
 	c := Default()
 	if b, err := os.ReadFile(path()); err == nil {
 		json.Unmarshal(b, c)
+		// Einstellungen einer älteren Version: Wer WlanMerge schon benutzt,
+		// braucht die Einrichtung für den ersten Start nicht mehr.
+		if !strings.Contains(string(b), `"onboarded"`) {
+			c.Onboarded = true
+		}
 	}
 	return c.normalize()
 }
@@ -128,6 +203,9 @@ func (c *Config) normalize() *Config {
 	}
 	if c.Disabled == nil {
 		c.Disabled = map[string]bool{}
+	}
+	if c.PhoneApps == nil {
+		c.PhoneApps = map[string]bool{}
 	}
 	c.ResetDay = max(0, min(28, c.ResetDay))
 	return c

@@ -29,6 +29,12 @@ WlanMerge spreads your PC's connections over all the lines you have – e.g. hom
 - Laufende Steam-/Battle.net-/Epic-Downloads werden umverteilt / running downloads are rebalanced
 - Browser-Downloads über alle Leitungen (Chrome/Edge-Erweiterung) / browser downloads over all lines
 - Eingebauter Speedtest mit Vergleich / built-in speed test with comparison
+- Surfen über die Leitung mit dem besten Ping, nur große Downloads werden verteilt / browsing uses the line with the best ping, only big downloads are spread
+- Automatische Pause, wenn nur eine Leitung Internet hat – macht von selbst weiter / automatic pause when only one line works, resumes by itself
+- Handy nur für ausgewählte Programme (z. B. nur Steam) / phone only for selected apps (e.g. only Steam)
+- Statistik (heute, 30 Tage, gesparte Zeit) und Live-Kurve / statistics (today, 30 days, time saved) and live chart
+- Sparsam: Im Hintergrund läuft nur ein kleiner Dienst (~40 MB, keine Grafiklast) – das Fenster läuft nur, solange es offen ist / lightweight: only a small background service runs (~40 MB, no GPU load)
+- Einrichtung beim ersten Start, Update-Hinweis, „Diagnose kopieren" / first-run setup, update notice, "copy diagnostics"
 - Deutsch & English, hell/dunkel / German & English, light/dark
 - Notaus: Netzwerk jederzeit sauber zurücksetzen / emergency network reset
 

@@ -120,8 +120,9 @@ Section
     ExecWait '"$INSTDIR\${PRODUCT_EXECUTABLE}" --restore'
     ExecWait '"$INSTDIR\${PRODUCT_EXECUTABLE}" --setup'
 
-    CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
-    CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
+    ; Verknüpfungen starten den Helfer: Läuft WlanMerge schon, öffnet er nur das Fenster – ohne Admin-Abfrage
+    CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\wlanmerge-host.exe" "--open" "$INSTDIR\${PRODUCT_EXECUTABLE}" 0
+    CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\wlanmerge-host.exe" "--open" "$INSTDIR\${PRODUCT_EXECUTABLE}" 0
 
     !insertmacro wails.associateFiles
     !insertmacro wails.associateCustomProtocols

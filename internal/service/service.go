@@ -11,17 +11,21 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"wlanmerge/internal/i18n"
-	"wlanmerge/internal/nativehost"
 
 	"wlanmerge/internal/balancer"
 	"wlanmerge/internal/config"
 	"wlanmerge/internal/downloader"
 	"wlanmerge/internal/engine"
+	"wlanmerge/internal/i18n"
+	"wlanmerge/internal/nativehost"
+	"wlanmerge/internal/procinfo"
 	"wlanmerge/internal/rules"
 	"wlanmerge/internal/safety"
 	"wlanmerge/internal/speedtest"
+	"wlanmerge/internal/stats"
+	"wlanmerge/internal/update"
 	"wlanmerge/internal/usage"
+	"wlanmerge/internal/version"
 )
 
 const (
@@ -32,49 +36,78 @@ const (
 	selfTestTimout = 8 * time.Second
 )
 
+// Automatische Pause (nur eine Leitung hat Internet → nichts zu bündeln).
+// Ein- und Ausschalten trennt jeweils die gerade offenen Verbindungen, deshalb
+// wird nur in ruhigen Momenten und nie in schneller Folge umgeschaltet.
+const (
+	pauseAfter    = 10 * time.Second // so lange muss es mit nur einer Leitung ruhig sein
+	pauseIdleRate = 50_000           // Bytes/s – darunter gilt "ruhig" (kein Download läuft)
+	resumeAfter   = 3 * time.Second  // so lange muss die zweite Leitung stabil da sein
+	switchGap     = 30 * time.Second // Mindestabstand zwischen zwei automatischen Wechseln
+	updateEvery   = 6 * time.Hour
+)
+
 // State ist alles, was die Oberfläche anzeigen muss.
 type State struct {
-	On          bool               `json:"on"`
-	Busy        bool               `json:"busy"`
-	Error       string             `json:"error"`
-	PublicIP    string             `json:"publicIp"`
-	AutoConnect bool               `json:"autoConnect"`
-	Rebalance   bool               `json:"rebalance"`
-	ResetDay    int                `json:"resetDay"`
-	DLEnabled   bool               `json:"dlEnabled"`
-	Downloads   []downloader.Info  `json:"downloads"`
-	Theme       string             `json:"theme"`
-	Lang        string             `json:"lang"` // tatsächliche Sprache ("de"/"en")
-	Links       []balancer.Stat    `json:"links"`
-	RxRate      int64              `json:"rxRate"`
-	TxRate      int64              `json:"txRate"`
-	Events      []balancer.Event   `json:"events"`
-	SpeedTest   *speedtest.Result  `json:"speedTest"`
-	SpeedSaved  *config.SavedSpeed `json:"speedSaved"`
+	On          bool                 `json:"on"`     // es wird gebündelt
+	Want        bool                 `json:"want"`   // eingeschaltet (kann trotzdem pausiert sein)
+	Paused      bool                 `json:"paused"` // eingeschaltet, wartet aber auf eine zweite Leitung
+	Busy        bool                 `json:"busy"`
+	Error       string               `json:"error"`
+	PublicIP    string               `json:"publicIp"`
+	AutoConnect bool                 `json:"autoConnect"`
+	AutoPause   bool                 `json:"autoPause"`
+	Rebalance   bool                 `json:"rebalance"`
+	ResetDay    int                  `json:"resetDay"`
+	DLEnabled   bool                 `json:"dlEnabled"`
+	Downloads   []downloader.Info    `json:"downloads"`
+	Theme       string               `json:"theme"`
+	Lang        string               `json:"lang"` // tatsächliche Sprache ("de"/"en")
+	Links       []balancer.Stat      `json:"links"`
+	RxRate      int64                `json:"rxRate"`
+	TxRate      int64                `json:"txRate"`
+	Events      []balancer.Event     `json:"events"`
+	SpeedTest   *speedtest.Result    `json:"speedTest"`
+	SpeedSaved  *config.SavedSpeed   `json:"speedSaved"`
+	History     []balancer.HistPoint `json:"history"` // letzte 60 s, für die Kurve
+	Stats       stats.Summary        `json:"stats"`
+	AppFilter   bool                 `json:"appFilter"`
+	Apps        []balancer.AppInfo   `json:"apps"`
+	UpdateCheck bool                 `json:"updateCheck"`
+	Update      *update.Info         `json:"update"` // neuere Version verfügbar (sonst nil)
+	Version     string               `json:"version"`
+	Onboarded   bool                 `json:"onboarded"`
 }
 
 type Service struct {
 	mu     sync.Mutex
 	cfg    *config.Config
 	usage  *usage.Store
+	daily  *stats.Store
 	dns    *rules.DNSCache
 	bal    *balancer.Balancer
 	dl     *downloader.Manager
 	eng    *engine.Engine
 	cancel context.CancelFunc
+	kick   chan struct{} // weckt den Autopiloten sofort
 
-	on, busy  bool
-	lastErr   string
-	publicIP  string
-	runCancel context.CancelFunc // Wächter, solange an
-	speed     *speedtest.Result  // letzter bzw. laufender Speedtest
+	want, paused bool      // Wunsch des Nutzers / wartet auf zweite Leitung
+	on, busy     bool      // Tunnel läuft / wird gerade aufgebaut
+	lastSwitch   time.Time // letzter automatischer Wechsel
+	lastErr      string
+	publicIP     string
+	runCancel    context.CancelFunc // Wächter, solange an
+	speed        *speedtest.Result  // letzter bzw. laufender Speedtest
+	upd          *update.Info
 }
 
 // New lädt Einstellungen und Verbrauch und beginnt, die Adapter zu beobachten.
 func New() *Service {
-	s := &Service{cfg: config.Load(), usage: usage.Load(), dns: rules.NewDNSCache()}
+	s := &Service{cfg: config.Load(), usage: usage.Load(), daily: stats.Load(), dns: rules.NewDNSCache(), kick: make(chan struct{}, 1)}
 	i18n.Set(s.cfg.Lang)
 	s.bal = balancer.New(s.cfg, s.usage, s.dns)
+	s.bal.Daily = s.daily
+	s.bal.AppOf = procinfo.Lookup
 	config.EnsureDir()
 	s.dl = downloader.New(s.downloadLines, downloader.Options{
 		DataDir:  config.Dir(),
@@ -87,6 +120,8 @@ func New() *Service {
 	s.cancel = cancel
 	s.dl.StartServer(ctx) // lokale Weitergabe an den Browser
 	go s.bal.Run(ctx)
+	go s.autopilot(ctx)
+	go s.watchUpdates(ctx)
 	return s
 }
 
@@ -96,6 +131,7 @@ func (s *Service) Close() {
 	s.Stop()
 	s.cancel()
 	s.usage.Save()
+	s.daily.Save()
 }
 
 func (s *Service) Config() *config.Config {
@@ -107,8 +143,164 @@ func (s *Service) Config() *config.Config {
 // HasLinks: gibt es überhaupt eine Internetverbindung?
 func (s *Service) HasLinks() bool { return len(s.bal.Links()) > 0 }
 
-// Start schaltet WlanMerge ein. Klappt der Selbsttest nicht, wird sofort
-// wieder alles zurückgesetzt.
+// SetOn ist der Ein/Aus-Knopf. Einschalten heißt: WlanMerge soll bündeln, sobald
+// es etwas zu bündeln gibt – den Rest erledigt der Autopilot. Ausschalten
+// stellt sofort den Originalzustand her.
+func (s *Service) SetOn(on bool) error {
+	if !on {
+		s.Stop()
+		return nil
+	}
+	s.mu.Lock()
+	s.want, s.lastErr = true, ""
+	s.mu.Unlock()
+	s.wake()
+	return nil
+}
+
+// wake lässt den Autopiloten sofort nachsehen (statt erst beim nächsten Takt).
+func (s *Service) wake() {
+	select {
+	case s.kick <- struct{}{}:
+	default:
+	}
+}
+
+// autopilot sorgt dafür, dass gebündelt wird, wenn es gewünscht und sinnvoll ist:
+//   - eingeschaltet und genug Leitungen → Tunnel aufbauen
+//   - nur eine Leitung hat Internet → in einem ruhigen Moment pausieren
+//     (dann läuft alles direkt über Windows, ohne Umweg über WlanMerge)
+//   - zweite Leitung wieder da → von selbst weitermachen
+//
+// Die Entscheidung selbst trifft pilot.step (ohne Seiteneffekte, damit testbar).
+func (s *Service) autopilot(ctx context.Context) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	var p pilot
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-s.kick:
+		}
+		s.mu.Lock()
+		in := pilotIn{want: s.want, on: s.on, busy: s.busy, paused: s.paused, auto: s.cfg.AutoPause, lastSwitch: s.lastSwitch}
+		s.mu.Unlock()
+		if in.want && !in.busy {
+			in.guard = s.bal.Guarding()
+			in.usable = s.bal.UsableLinks(false)
+			in.verified = s.bal.UsableLinks(true)
+			in.rate = s.bal.TotalRate()
+		}
+		switch p.step(in, time.Now()) {
+		case actPause:
+			s.pause()
+		case actWait:
+			s.setPaused(true) // wartet auf die zweite Leitung
+		case actStart:
+			if err := s.Start(); err != nil {
+				// Genau ein Versuch: bei einem echten Fehler nicht ständig neu einschalten
+				// (das würde jedes Mal kurz alle Verbindungen unterbrechen).
+				s.mu.Lock()
+				s.want = false
+				s.mu.Unlock()
+				s.setPaused(false)
+			} else if in.paused {
+				s.bal.Log(i18n.T("Zweite Leitung ist da – es wird wieder gebündelt"))
+			}
+		}
+	}
+}
+
+// pilotIn ist alles, was der Autopilot für eine Entscheidung wissen muss.
+type pilotIn struct {
+	want, on, busy, paused bool
+	auto                   bool  // automatische Pause eingeschaltet
+	guard                  bool  // eine Leitung ist am Limit oder abgeschaltet → Tunnel schützt sie
+	usable                 int   // nutzbare Leitungen
+	verified               int   // davon in den letzten 20 s nachweislich online
+	rate                   int64 // Bytes/s durch WlanMerge
+	lastSwitch             time.Time
+}
+
+type pilotAct int
+
+const (
+	actNone  pilotAct = iota
+	actPause          // Tunnel abbauen, eingeschaltet bleiben
+	actWait           // nicht genug Leitungen: als "pausiert" anzeigen
+	actStart          // Tunnel aufbauen
+)
+
+// pilot merkt sich, seit wann ein Zustand anhält.
+type pilot struct{ fewSince, enoughSince time.Time }
+
+func (p *pilot) step(in pilotIn, now time.Time) pilotAct {
+	if !in.want || in.busy {
+		p.fewSince, p.enoughSince = time.Time{}, time.Time{}
+		return actNone
+	}
+	if in.on {
+		p.enoughSince = time.Time{}
+		if !in.auto || in.guard || in.usable >= 2 || in.rate >= pauseIdleRate {
+			p.fewSince = time.Time{}
+			return actNone
+		}
+		if p.fewSince.IsZero() {
+			p.fewSince = now
+		}
+		if now.Sub(p.fewSince) >= pauseAfter && now.Sub(in.lastSwitch) >= switchGap {
+			p.fewSince = time.Time{}
+			return actPause
+		}
+		return actNone
+	}
+	// Gewünscht, aber der Tunnel läuft nicht.
+	p.fewSince = time.Time{}
+	need := 2
+	if !in.auto || in.guard {
+		need = 1
+	}
+	n := in.usable
+	if in.paused {
+		n = in.verified // nach einer Pause nur bei nachweislich funktionierenden Leitungen weitermachen
+	}
+	if n < need {
+		p.enoughSince = time.Time{}
+		if !in.paused {
+			return actWait
+		}
+		return actNone
+	}
+	if p.enoughSince.IsZero() {
+		p.enoughSince = now
+	}
+	if in.paused && (now.Sub(p.enoughSince) < resumeAfter || now.Sub(in.lastSwitch) < switchGap) {
+		return actNone
+	}
+	p.enoughSince = time.Time{}
+	return actStart
+}
+func (s *Service) setPaused(p bool) {
+	s.mu.Lock()
+	s.paused = p
+	s.mu.Unlock()
+	s.bal.SetProbe(p)
+}
+
+// pause baut den Tunnel ab, bleibt aber eingeschaltet (wartet auf eine zweite Leitung).
+func (s *Service) pause() {
+	s.stopEngine()
+	s.mu.Lock()
+	s.lastSwitch = time.Now()
+	s.mu.Unlock()
+	s.setPaused(true)
+	s.bal.Log(i18n.T("Pausiert: Nur eine Leitung hat Internet – es gibt nichts zu bündeln"))
+}
+
+// Start baut den Tunnel auf. Klappt der Selbsttest nicht, wird sofort wieder
+// alles zurückgesetzt.
 func (s *Service) Start() error {
 	s.mu.Lock()
 	if s.on || s.busy {
@@ -124,12 +316,20 @@ func (s *Service) Start() error {
 	s.busy = false
 	if err != nil {
 		s.lastErr = err.Error()
+	} else {
+		s.want, s.lastSwitch = true, time.Now()
 	}
 	s.mu.Unlock()
+	if err == nil {
+		s.setPaused(false)
+	}
 	return err
 }
 
 func (s *Service) start() error {
+	if config.Sandbox() != "" {
+		return errors.New(i18n.T("Testmodus: Das Netzwerk wird nicht verändert"))
+	}
 	if _, active := safety.Load(); active {
 		safety.Restore(func(string) {}) // Reste eines Absturzes oder anderes WlanMerge
 	}
@@ -161,8 +361,17 @@ func (s *Service) start() error {
 	return nil
 }
 
-// Stop schaltet aus und stellt den Originalzustand her.
+// Stop schaltet aus (auch den Wunsch "an") und stellt den Originalzustand her.
 func (s *Service) Stop() {
+	s.mu.Lock()
+	s.want = false
+	s.mu.Unlock()
+	s.setPaused(false)
+	s.stopEngine()
+}
+
+// stopEngine baut nur den Tunnel ab.
+func (s *Service) stopEngine() {
 	s.mu.Lock()
 	eng, cancel := s.eng, s.runCancel
 	s.eng, s.runCancel, s.on, s.publicIP = nil, nil, false, ""
@@ -271,13 +480,20 @@ func probeOne(url string, timeout time.Duration) (string, error) {
 func (s *Service) Snapshot() State {
 	s.mu.Lock()
 	st := State{
-		On: s.on, Busy: s.busy, Error: s.lastErr, PublicIP: s.publicIP,
-		AutoConnect: s.cfg.AutoConnect, Rebalance: s.cfg.Rebalance,
+		On: s.on, Want: s.want, Paused: s.paused && s.want && !s.on, Busy: s.busy,
+		Error: s.lastErr, PublicIP: s.publicIP,
+		AutoConnect: s.cfg.AutoConnect, AutoPause: s.cfg.AutoPause, Rebalance: s.cfg.Rebalance,
 		ResetDay: s.cfg.ResetDay, Theme: s.cfg.Theme, Lang: i18n.Lang(),
 		DLEnabled: s.cfg.DLEnabled,
 		SpeedTest: s.speed, SpeedSaved: s.cfg.SpeedSaved,
+		AppFilter: s.cfg.AppFilter, UpdateCheck: s.cfg.UpdateCheck, Update: s.upd,
+		Version: version.Current, Onboarded: s.cfg.Onboarded,
 	}
+	since := s.cfg.LastReset(time.Now()) // Statistik-Zeitraum wie beim Datenlimit
 	s.mu.Unlock()
+	st.History = s.bal.History()
+	st.Stats = s.daily.Summary(since)
+	st.Apps = s.bal.Apps()
 	st.Links = s.bal.Stats()
 	for _, l := range st.Links {
 		st.RxRate += l.RxRate
@@ -341,6 +557,80 @@ func (s *Service) SetTheme(theme string) error {
 // SetResetDay: an diesem Tag im Monat (1–28) beginnt der Verbrauch bei 0; 0 = nie.
 func (s *Service) SetResetDay(day int) error {
 	return s.update(func(c *config.Config) { c.ResetDay = max(0, min(28, day)) })
+}
+
+// SetAutoPause: bei nur einer Leitung von selbst pausieren.
+func (s *Service) SetAutoPause(on bool) error {
+	err := s.update(func(c *config.Config) { c.AutoPause = on })
+	s.wake()
+	return err
+}
+
+// SetAppFilter: nur ausgewählte Programme dürfen das Handy benutzen.
+func (s *Service) SetAppFilter(on bool) error {
+	return s.update(func(c *config.Config) { c.AppFilter = on })
+}
+
+// SetPhoneApp erlaubt oder verbietet einem Programm (z. B. "steam.exe") das Handy.
+func (s *Service) SetPhoneApp(name string, allowed bool) error {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return nil
+	}
+	names := []string{name}
+	if g := config.KnownGroup(name); g != nil {
+		names = g.Exes // bekanntes Programm: alle seine Dateien
+	}
+	return s.update(func(c *config.Config) {
+		for _, n := range names {
+			if allowed {
+				c.PhoneApps[n] = true
+			} else {
+				delete(c.PhoneApps, n)
+			}
+		}
+	})
+}
+
+func (s *Service) SetUpdateCheck(on bool) error {
+	if !on {
+		s.mu.Lock()
+		s.upd = nil
+		s.mu.Unlock()
+	}
+	return s.update(func(c *config.Config) { c.UpdateCheck = on })
+}
+
+// SetOnboarded: Die Einrichtung beim ersten Start ist abgeschlossen.
+func (s *Service) SetOnboarded() error {
+	return s.update(func(c *config.Config) { c.Onboarded = true })
+}
+
+// watchUpdates sieht kurz nach dem Start und dann alle paar Stunden nach, ob
+// es eine neuere Version gibt. Es wird nichts heruntergeladen.
+func (s *Service) watchUpdates(ctx context.Context) {
+	var last time.Time
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if !s.Config().UpdateCheck || time.Since(last) < updateEvery || !s.HasLinks() {
+			continue
+		}
+		last = time.Now()
+		in, err := update.Check(ctx)
+		if err != nil {
+			last = last.Add(time.Hour - updateEvery) // in einer Stunde nochmal
+			continue
+		}
+		s.mu.Lock()
+		s.upd = in
+		s.mu.Unlock()
+	}
 }
 
 // MarkHideHintShown merkt sich, dass der Hintergrund-Hinweis gezeigt wurde.
