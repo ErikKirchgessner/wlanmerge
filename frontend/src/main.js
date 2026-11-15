@@ -561,7 +561,7 @@ function renderSettings() {
   setProp($("#set-dl-enabled"), "checked", st.dlEnabled);
   setProp($("#set-appfilter"), "checked", st.appFilter);
   setProp($("#set-update"), "checked", st.updateCheck);
-  setText($("#version"), t("Version {v} · MIT-Lizenz", { v: st.version || "–" }));
+  setText($("#version"), t("Version {v} · MIT-Lizenz · Danke fürs Testen!", { v: st.version || "–" }));
   $("#lang-de").classList.toggle("on", getLang() === "de");
   $("#lang-en").classList.toggle("on", getLang() === "en");
   renderApps(st);

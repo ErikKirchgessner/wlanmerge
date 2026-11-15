@@ -8,7 +8,7 @@ import (
 )
 
 // Current ist die Version dieses Programms.
-const Current = "1.2.0"
+const Current = "1.2.1"
 
 // Repo ist das GitHub-Projekt, aus dem neue Versionen kommen.
 const Repo = "ErikKirchgessner/wlanmerge"

@@ -120,7 +120,7 @@ const EN = {
   "Öffnen": "Open",
   "Nach Updates suchen": "Check for updates",
   "Fragt gelegentlich bei GitHub nach – installiert wird nichts automatisch": "Asks GitHub now and then – nothing is installed automatically",
-  "Version {v} · MIT-Lizenz": "Version {v} · MIT License",
+  "Version {v} · MIT-Lizenz · Danke fürs Testen!": "Version {v} · MIT License · Thanks for testing!",
   "Automatisch einschalten": "Turn on automatically",
   "Beim Programmstart sofort bündeln": "Start bonding as soon as the app starts",
   "Mit {os} starten": "Start with {os}",
